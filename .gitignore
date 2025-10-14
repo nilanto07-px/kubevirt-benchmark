@@ -1,0 +1,24 @@
+# Python cache and build
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Logs
+*.log
+
+# IDE / Editor configs
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+
+# Temporary files
+*.tmp
+*.swp

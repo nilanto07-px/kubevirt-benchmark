@@ -8,14 +8,12 @@ metadata:
 spec:
   containers:
   - name: ssh-client
-    image: registry.access.redhat.com/ubi9/ubi:latest
+    image: alpine:latest
     command:
-      - /bin/bash
+      - /bin/sh
       - -c
       - |
-        # Install required packages
-        dnf install -y iputils openssh-clients nc
-        # Keep container running
+        apk add --no-cache bash iputils openssh-client netcat-openbsd
         tail -f /dev/null
     resources:
       requests:

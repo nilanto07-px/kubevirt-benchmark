@@ -16,9 +16,10 @@ import argparse
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Tuple, Dict, List, Optional
+from typing import Tuple, List, Optional
+import subprocess, json
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -33,7 +34,7 @@ from utils.common import (
 # Default configuration
 DEFAULT_VM_YAML = 'vm-template.yaml'
 DEFAULT_VM_NAME = 'rhel-9-vm'
-DEFAULT_SSH_POD = 'ssh-pod-name'
+DEFAULT_SSH_POD = 'ssh-test-pod'
 DEFAULT_SSH_POD_NS = 'default'
 DEFAULT_POLL_INTERVAL = 1
 DEFAULT_CONCURRENCY = 50
@@ -252,7 +253,6 @@ def create_vm(ns: str, vm_yaml: str, node_name: Optional[str], logger) -> Tuple[
 
             if modified_yaml:
                 # Create VM using modified YAML via stdin
-                import subprocess
                 process = subprocess.Popen(
                     ['kubectl', 'create', '-f', '-', '-n', ns],
                     stdin=subprocess.PIPE,
@@ -382,10 +382,10 @@ def wait_for_ping(ns: str, ip: str, start_ts: datetime, ssh_pod: str, ssh_pod_ns
 
 
 def monitor_vm(ns: str, vm_name: str, start_ts: datetime, ssh_pod: str, ssh_pod_ns: str,
-               poll_interval: int, ping_timeout: int, logger) -> Tuple[str, float, float, bool]:
+               poll_interval: int, ping_timeout: int, logger) -> Tuple[str, float, float, float, bool]:
     """
-    Monitor a single VM through its lifecycle.
-    
+    Monitor a single VM through its lifecycle and record clone timing.
+
     Args:
         ns: Namespace
         vm_name: VM name
@@ -395,27 +395,115 @@ def monitor_vm(ns: str, vm_name: str, start_ts: datetime, ssh_pod: str, ssh_pod_
         poll_interval: Polling interval
         ping_timeout: Ping timeout
         logger: Logger instance
-    
+
     Returns:
-        Tuple of (namespace, running_time, ping_time, success)
+        Tuple of (namespace, running_time, ping_time, clone_duration, success)
     """
     try:
-        # Wait for Running state
+        # Step 1: Track clone timing first
+        clone_start, clone_end, clone_duration = track_clone_progress(ns, vm_name, start_ts, poll_interval, logger)
+
+        # Step 2: Wait for VM to become Running
         _, running_time = wait_for_vm_running(ns, vm_name, start_ts, poll_interval, logger)
-        
-        # Wait for IP
+
+        # Step 3: Wait for VMI IP
         ip = wait_for_vmi_ip(ns, vm_name, poll_interval, logger)
-        
-        # Wait for ping
+
+        # Step 4: Wait until ping works
         _, ping_time, success = wait_for_ping(
             ns, ip, start_ts, ssh_pod, ssh_pod_ns, poll_interval, ping_timeout, logger
         )
-        
-        return ns, running_time, ping_time, success
-    
+
+        return ns, running_time, ping_time, clone_duration, success
+
     except Exception as e:
         logger.error(f"[{ns}] Error monitoring VM: {e}")
-        return ns, None, None, False
+        return ns, None, None, None, False
+
+from datetime import datetime, timedelta
+import subprocess, json, time
+
+def track_clone_progress(ns: str, vm_name: str, start_ts: datetime, poll_interval: int, logger, timeout: int = 1800):
+    """
+    Track DataVolume clone timing for a given VM, including inferred clone start logic.
+
+    Args:
+        ns: Namespace
+        vm_name: VM name (used to derive DV name)
+        start_ts: Time when VM creation was initiated
+        poll_interval: Poll interval in seconds
+        logger: Logger instance
+        timeout: Timeout in seconds
+
+    Returns:
+        Tuple (clone_start_time, clone_end_time, clone_duration_seconds)
+        or (None, None, None) if not detected
+    """
+
+    # Match the DV name from your spec
+    dv_name = f"{vm_name}-volume"
+    logger.info(f"[{ns}] Tracking DataVolume clone progress for {dv_name}")
+
+    clone_start = None
+    clone_end = None
+    clone_inferred = False
+    elapsed = 0
+
+    while elapsed < timeout:
+        try:
+            result = subprocess.run(
+                ["kubectl", "get", "dv", dv_name, "-n", ns, "-o", "json"],
+                capture_output=True, text=True, check=False
+            )
+            if result.returncode != 0 or not result.stdout:
+                time.sleep(poll_interval)
+                elapsed = (datetime.now() - start_ts).total_seconds()
+                continue
+
+            data = json.loads(result.stdout)
+            phase = data.get("status", {}).get("phase", "").lower()
+
+            # CloneScheduled observed
+            if phase == "clonescheduled" and not clone_start:
+                clone_start = datetime.now()
+                logger.info(f"[{ns}] {dv_name} entered CloneScheduled at {(clone_start - start_ts).total_seconds():.2f}s")
+
+            # Clone in progress but no CloneScheduled observed (inferred)
+            elif phase == "csicloneinprogress" and not clone_start:
+                clone_start = datetime.now() - timedelta(seconds=poll_interval)
+                clone_inferred = True
+                logger.info(f"[{ns}] {dv_name} likely skipped CloneScheduled (inferred start at {(clone_start - start_ts).total_seconds():.2f}s)")
+
+            # Clone succeeded
+            elif phase == "succeeded":
+                if not clone_start:
+                    # infer that clone started just before success
+                    clone_start = datetime.now() - timedelta(seconds=poll_interval)
+                    clone_inferred = True
+                    logger.info(f"[{ns}] {dv_name} clone was likely too fast; inferring CloneScheduled at {(clone_start - start_ts).total_seconds():.2f}s")
+                clone_end = datetime.now()
+                logger.info(f"[{ns}] {dv_name} clone succeeded at {(clone_end - start_ts).total_seconds():.2f}s")
+                break
+
+            elif phase == "failed":
+                logger.error(f"[{ns}] {dv_name} entered Failed state")
+                return None, None, None
+
+        except Exception as e:
+            logger.error(f"[{ns}] Error tracking clone progress: {e}")
+            return None, None, None
+
+        time.sleep(poll_interval)
+        elapsed = (datetime.now() - start_ts).total_seconds()
+
+    if clone_start and clone_end:
+        duration = round((clone_end - clone_start).total_seconds(), 2)
+        inferred_text = " (inferred)" if clone_inferred else ""
+        logger.info(f"[{ns}] {dv_name} CloneScheduled to Succeeded duration: {duration} seconds{inferred_text}")
+        return clone_start, clone_end, duration
+    else:
+        logger.warning(f"[{ns}] Clone tracking incomplete or timed out")
+        return None, None, None
 
 
 def main():
@@ -509,7 +597,7 @@ def main():
     logger.info(f"\nPhase 2: Monitoring {len(start_times)} VMs (concurrency={args.concurrency})...")
     monitor_start = datetime.now()
     results = []
-    
+
     with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
         futures = {
             executor.submit(
@@ -518,16 +606,16 @@ def main():
             ): ns
             for ns, ts in start_times.items()
         }
-        
+
         for future in as_completed(futures):
+            ns = futures[future]
             try:
-                result = future.result()
+                result = future.result()  # now returns (ns, run_time, ping_time, clone_time, success)
                 results.append(result)
             except Exception as e:
-                ns = futures[future]
                 logger.error(f"[{ns}] Monitoring failed: {e}")
-                results.append((ns, None, None, False))
-    
+                results.append((ns, None, None, None, False))
+
     monitor_elapsed = (datetime.now() - monitor_start).total_seconds()
     total_elapsed = (datetime.now() - create_start).total_seconds()
     
@@ -651,7 +739,7 @@ def main():
     logger.info("\nTest completed successfully!")
     
     # Exit with error code if any VMs failed
-    failed_count = sum(1 for r in results if not r[3])
+    failed_count = sum(1 for r in results if not r[4])
     sys.exit(0 if failed_count == 0 else 1)
 
 
