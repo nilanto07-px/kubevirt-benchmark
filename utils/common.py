@@ -56,6 +56,9 @@ def setup_logging(log_file: Optional[str] = None, log_level: str = 'INFO') -> lo
     console_handler.setLevel(getattr(logging, log_level.upper()))
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
+
+    if not log_file:
+        log_file = f"kubevirt-perf-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
     
     # File handler if specified
     if log_file:
@@ -1054,56 +1057,66 @@ def add_node_selector_to_vm_yaml(yaml_file: str, node_name: str,
 def print_summary_table(results: List[Tuple], title: str = "Performance Test Summary"):
     """
     Print a formatted summary table of test results.
-    
+
     Args:
         results: List of tuples containing test results
         title: Table title
     """
     print(f"\n{Colors.BOLD}{title}{Colors.ENDC}")
-    print("=" * 80)
-    print(f"{'Namespace':<30}{'Running(s)':<15}{'Ping(s)':<15}{'Status':<20}")
-    print("-" * 80)
-    
+    print("=" * 95)
+    print(f"{'Namespace':<30}{'Running(s)':<15}{'Ping(s)':<15}{'Clone(s)':<15}{'Status':<20}")
+    print("-" * 95)
+
     successful = 0
     failed = 0
     running_times = []
     ping_times = []
-    
+    clone_times = []
+
     for result in sorted(results, key=lambda x: x[0]):
-        ns, run_t, ping_t, ok = result[:4]
-        
+        # Updated tuple unpacking for new 5-element structure
+        ns, run_t, ping_t, clone_t, ok = result[:5]
+
         run_str = f"{run_t:.2f}" if run_t is not None else '-'
         ping_str = f"{ping_t:.2f}" if ping_t is not None and ok else 'Timeout'
+        clone_str = f"{clone_t:.2f}" if clone_t is not None else '-'
         status = f"{Colors.OKGREEN}Success{Colors.ENDC}" if ok else f"{Colors.FAIL}Failed{Colors.ENDC}"
-        
-        print(f"{ns:<30}{run_str:<15}{ping_str:<15}{status:<20}")
-        
+
+        print(f"{ns:<30}{run_str:<15}{ping_str:<15}{clone_str:<15}{status:<20}")
+
         if ok:
             successful += 1
             if run_t is not None:
                 running_times.append(run_t)
             if ping_t is not None:
                 ping_times.append(ping_t)
+            if clone_t is not None:
+                clone_times.append(clone_t)
         else:
             failed += 1
-    
-    print("=" * 80)
+
+    print("=" * 95)
     print(f"\n{Colors.BOLD}Statistics:{Colors.ENDC}")
     print(f"  Total VMs:              {successful + failed}")
     print(f"  Successful:             {Colors.OKGREEN}{successful}{Colors.ENDC}")
     print(f"  Failed:                 {Colors.FAIL}{failed}{Colors.ENDC}")
-    
+
     if running_times:
-        print(f"  Avg Time to Running:    {sum(running_times)/len(running_times):.2f}s")
+        print(f"  Avg Time to Running:    {sum(running_times) / len(running_times):.2f}s")
         print(f"  Max Time to Running:    {max(running_times):.2f}s")
         print(f"  Min Time to Running:    {min(running_times):.2f}s")
-    
+
     if ping_times:
-        print(f"  Avg Time to Ping:       {sum(ping_times)/len(ping_times):.2f}s")
+        print(f"  Avg Time to Ping:       {sum(ping_times) / len(ping_times):.2f}s")
         print(f"  Max Time to Ping:       {max(ping_times):.2f}s")
         print(f"  Min Time to Ping:       {min(ping_times):.2f}s")
-    
-    print("=" * 80)
+
+    if clone_times:
+        print(f"  Avg Clone Duration:     {sum(clone_times) / len(clone_times):.2f}s")
+        print(f"  Max Clone Duration:     {max(clone_times):.2f}s")
+        print(f"  Min Clone Duration:     {min(clone_times):.2f}s")
+
+    print("=" * 95)
 
 
 def validate_prerequisites(ssh_pod: str, ssh_pod_ns: str, logger: logging.Logger) -> bool:
