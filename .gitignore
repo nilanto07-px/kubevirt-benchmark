@@ -12,6 +12,7 @@ results/
 
 # Logs
 *.log
+*.html
 
 # IDE / Editor configs
 .idea/
@@ -23,3 +24,4 @@ results/
 # Temporary files
 *.tmp
 *.swp
+
