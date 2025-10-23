@@ -45,7 +45,7 @@ The user running these tests needs:
 ## Repository Structure
 
 ```
-kubevirt-performance-testing/
+kubevirt-benchmark-suite/
 ├── README.md                          # This file
 ├── QUICKSTART.md                      # 5-minute quick start guide
 ├── SETUP.md                           # Detailed setup instructions
@@ -55,8 +55,7 @@ kubevirt-performance-testing/
 ├── requirements.txt                   # Python dependencies
 │
 ├── datasource-clone/                  # DataSource-based VM provisioning tests
-│   ├── measure-vm-creation-time.py   # Main test script
-│   └── vm-template.yaml              # VM YAML template
+│   └── measure-vm-creation-time.py   # Main test script
 │
 ├── migration/                         # Live migration performance tests
 │   └── measure-vm-migration-time.py  # Main migration test script
@@ -69,11 +68,17 @@ kubevirt-performance-testing/
 │
 ├── utils/                             # Shared utilities
 │   ├── common.py                     # Common functions and logging
+│   ├── validate_cluster.py           # Cluster validation script
+│   ├── apply_template.sh             # Template helper script
 │   └── README.md                     # Utils documentation
 │
 └── examples/                          # Example configurations
     ├── storage-classes/              # Sample StorageClass definitions
-    ├── vm-templates/                 # Sample VM templates
+    │   └── portworx/                 # Portworx storage classes
+    │       ├── portworx-fada-sc.yaml # Pure FlashArray Direct Access SC
+    │       └── portworx-raw-sc.yaml  # Standard Portworx SC
+    ├── vm-templates/                 # VM template files
+    │   └── vm-template.yaml          # Templated VM configuration
     ├── ssh-pod.yaml                  # SSH test pod for network tests
     ├── sequential-migration.sh       # Sequential migration example
     ├── parallel-migration.sh         # Parallel migration example
@@ -86,8 +91,8 @@ kubevirt-performance-testing/
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/your-org/kubevirt-perf-testing.git
-cd kubevirt-perf-testing
+git clone https://github.com/your-org/kubevirt-benchmark-suite.git
+cd kubevirt-benchmark-suite
 ```
 
 ### 2. Install Dependencies
@@ -96,16 +101,32 @@ cd kubevirt-perf-testing
 pip3 install -r requirements.txt
 ```
 
-### 3. Configure Your Environment
+### 3. Validate Your Cluster
 
-Ensure kubectl is configured to access your OpenShift cluster:
+Validate that your cluster is ready for benchmarks:
 
 ```bash
-kubectl cluster-info
-kubectl get nodes
+python3 utils/validate_cluster.py --storage-class portworx-fada-sc
 ```
 
-### 4. Run a Basic Test
+See [VALIDATION_GUIDE.md](VALIDATION_GUIDE.md) for detailed validation options.
+
+### 4. Configure VM Templates
+
+Apply template variables to create customized VM configurations:
+
+```bash
+./utils/apply_template.sh \
+  --output /tmp/my-vm.yaml \
+  --vm-name my-test-vm \
+  --storage-class portworx-fada-sc \
+  --memory 4Gi \
+  --cpu-cores 2
+```
+
+See [TEMPLATE_GUIDE.md](TEMPLATE_GUIDE.md) for detailed template usage.
+
+### 5. Run a Basic Test
 
 Test VM creation with 10 VMs:
 
@@ -421,9 +442,45 @@ Enable debug logging for detailed troubleshooting:
 python3 measure-vm-creation-time.py --log-level DEBUG --start 1 --end 5
 ```
 
-## Cleanup
 
-> **📖 For comprehensive cleanup documentation, see [CLEANUP_GUIDE.md](CLEANUP_GUIDE.md)**
+## Utility Tools
+
+### Cluster Validation
+
+Validate your cluster before running benchmarks:
+
+```bash
+# Basic validation
+python3 utils/validate_cluster.py --storage-class portworx-fada-sc
+
+# Comprehensive validation
+python3 utils/validate_cluster.py --all --storage-class portworx-fada-sc
+```
+
+See [VALIDATION_GUIDE.md](VALIDATION_GUIDE.md) for details.
+
+### Template Management
+
+Apply template variables to VM configurations:
+
+```bash
+# Basic usage
+./utils/apply_template.sh -o /tmp/vm.yaml -n my-vm -s portworx-fada-sc
+
+# Full customization
+./utils/apply_template.sh \
+  -o /tmp/custom-vm.yaml \
+  -n high-perf-vm \
+  -s portworx-raw-sc \
+  --storage-size 100Gi \
+  --memory 8Gi \
+  --cpu-cores 4
+```
+
+See [TEMPLATE_GUIDE.md](TEMPLATE_GUIDE.md) for details.
+
+
+## Cleanup
 
 ### Automatic Cleanup
 
@@ -542,17 +599,20 @@ CLEANUP SUMMARY
   Errors:                      0
 ================================================================================
 ```
+> **📖 For comprehensive cleanup documentation, see [CLEANUP_GUIDE.md](CLEANUP_GUIDE.md)**
+
 
 ## Best Practices
 
-1. **Start Small**: Begin with 5-10 VMs to validate your setup before scaling
-2. **Monitor Resources**: Watch cluster resource utilization during tests
-3. **Use Dedicated Namespaces**: Tests create namespaces with predictable names for easy cleanup
-4. **Save Results**: Always use `--log-file` to preserve test results
-5. **Cleanup**: Use `--cleanup` flag to automatically remove test resources after completion
-6. **Dry Run First**: Use `--dry-run-cleanup` to verify what will be deleted before actual cleanup
-7. **Network Testing**: Deploy an SSH pod in advance for ping tests
-8. **Production Safety**: Always use `--dry-run-cleanup` first in production environments
+1. **Validate First**: Always run cluster validation before benchmarks
+2. **Use Templates**: Use the template helper script for consistent VM configurations
+3. **Start Small**: Begin with 5-10 VMs to validate your setup before scaling
+4. **Monitor Resources**: Watch cluster resource utilization during tests
+5. **Use Dedicated Namespaces**: Tests create namespaces with predictable names for easy cleanup
+6. **Save Results**: Always use `--log-file` to preserve test results
+7. **Cleanup**: Remove test resources after completion to free cluster resources
+8. **Network Testing**: Deploy an SSH pod in advance for ping tests
+
 
 ## Contributing
 
@@ -566,8 +626,6 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 For issues, questions, or contributions:
 - Open an issue on GitHub
-- Contact: [your-support-email]
-- Documentation: [your-docs-url]
 
 ## Acknowledgments
 
