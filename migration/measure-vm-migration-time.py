@@ -27,9 +27,11 @@ License: Apache 2.0
 
 import argparse
 import os
+import subprocess
 import sys
 import time
 import random
+import yaml
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Tuple, Dict, List, Optional
@@ -43,7 +45,7 @@ from utils.common import (
     validate_prerequisites, get_worker_nodes, select_random_node,
     add_node_selector_to_vm_yaml, get_vm_node, migrate_vm, get_migration_status,
     wait_for_migration_complete, get_available_nodes, create_namespace,
-    find_busiest_node, get_vms_on_node, remove_node_selectors, save_migration_results
+    find_busiest_node, get_vms_on_node, remove_node_selectors, save_migration_results, get_px_version_from_cluster
 )
 
 # Default configuration
@@ -147,6 +149,20 @@ Examples:
     )
 
     parser.add_argument(
+        '--px-version',
+        type=str,
+        default=None,
+        help='Portworx version to include in results path (auto-detect if not provided)'
+    )
+
+    parser.add_argument(
+        '--px-namespace',
+        type=str,
+        default="portworx",
+        help='Namespace where Portworx is installed (default: portworx)'
+    )
+
+    parser.add_argument(
         '--results-folder',
         type=str,
         default='results',
@@ -191,10 +207,6 @@ def validate_migration_args(args, logger):
         logger.error("--auto-select-busiest can only be used with --evacuate")
         return False
 
-    # For sequential/parallel, we need at least source node
-    if not args.source_node:
-        logger.error("--source-node is required (or use --round-robin)")
-        return False
 
     return True
 
@@ -319,7 +331,12 @@ def main():
     logger.info(f"VM name: {args.vm_name}")
     logger.info(f"Namespace prefix: {args.namespace_prefix}")
     logger.info(f"Create VMs: {args.create_vms}")
-    
+
+    if not args.px_version:
+        args.px_version = get_px_version_from_cluster(logger, namespace=args.px_namespace)
+    else:
+        logger.info(f"Using provided PX version: {args.px_version}")
+
     if args.round_robin:
         logger.info("Migration mode: Round-robin")
     elif args.evacuate:
@@ -491,6 +508,34 @@ def main():
         logger.info("VMs are ready for live migration!")
         logger.info("=" * 80)
 
+    logger.info("Detecting disk count from existing VM spec...")
+    try:
+        sample_ns = f"{args.namespace_prefix}-{args.start}"
+        vm_yaml_cmd = [
+            "kubectl", "get", "vm", args.vm_name, "-n", sample_ns, "-o", "yaml"
+        ]
+        result = subprocess.run(vm_yaml_cmd, capture_output=True, text=True, check=False)
+        if result.returncode == 0 and result.stdout:
+            vm_spec = yaml.safe_load(result.stdout)
+            volumes = (
+                vm_spec.get("spec", {})
+                .get("template", {})
+                .get("spec", {})
+                .get("volumes", [])
+            )
+            non_cloudinit = [
+                v for v in volumes
+                if not any(k in v for k in ["cloudInitNoCloud", "cloudInitConfigDrive"])
+            ]
+            num_disks = len(non_cloudinit)
+            logger.info(f"Detected {num_disks} disks (excluding cloud-init volumes)")
+        else:
+            logger.warning("Could not retrieve VM spec; defaulting to 1 disk")
+            num_disks = 1
+    except Exception as e:
+        logger.error(f"Error detecting disks: {e}")
+        num_disks = 1
+
     # Phase 2: Perform Migration
     logger.info("\n" + "=" * 80)
     logger.info("PHASE 2: Live Migration")
@@ -501,7 +546,7 @@ def main():
 
     # Scenario 1: Sequential Migration
     if not args.parallel and not args.evacuate and not args.round_robin:
-        logger.info(f"\nSequential migration from {args.source_node} to {args.target_node or 'auto-selected node'}")
+        logger.info(f"\nSequential migration from {args.source_node or 'auto-selected node'} to {args.target_node or 'auto-selected node'}")
 
         for ns in namespaces:
             result = migrate_vm_sequential(ns, args.vm_name, args.target_node, args.migration_timeout, logger)
@@ -512,7 +557,7 @@ def main():
 
     # Scenario 2: Parallel Migration
     elif args.parallel and not args.evacuate and not args.round_robin:
-        logger.info(f"\nParallel migration from {args.source_node} to {args.target_node or 'auto-selected node'}")
+        logger.info(f"\nParallel migration from {args.source_node or 'auto-selected node'} to {args.target_node or 'auto-selected node'}")
         logger.info(f"Concurrency: {args.concurrency}")
 
         with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
@@ -748,9 +793,15 @@ def main():
     if args.save_results:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         suffix = f"{args.namespace_prefix}_{args.start}-{args.end}"
-        base_results_dir = args.results_folder
-        out_dir = os.path.join(base_results_dir, f"{timestamp}_live_migration_{suffix}")
+
+        out_dir = os.path.join(
+            args.results_folder,
+            args.px_version,
+            f"{num_disks}-disk",
+            f"{timestamp}_live_migration_{suffix}"
+        )
         os.makedirs(out_dir, exist_ok=True)
+
         logger.info(f"Created results directory: {out_dir}")
 
         # Save detailed and summary results in the correct folder

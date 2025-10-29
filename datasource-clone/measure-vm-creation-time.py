@@ -13,6 +13,7 @@ License: Apache 2.0
 """
 
 import argparse
+import yaml
 import os
 import sys
 from datetime import datetime, timedelta
@@ -27,7 +28,7 @@ from utils.common import (
     setup_logging, run_kubectl_command, create_namespace, create_namespaces_parallel,
     delete_namespace, get_vm_status, get_vmi_ip, ping_vm, print_summary_table,
     validate_prerequisites, stop_vm, start_vm, wait_for_vm_stopped,
-    get_worker_nodes, select_random_node, add_node_selector_to_vm_yaml, save_results
+    get_worker_nodes, select_random_node, add_node_selector_to_vm_yaml, save_results, get_px_version_from_cluster
 )
 
 # Default configuration
@@ -36,7 +37,7 @@ DEFAULT_VM_NAME = 'rhel-9-vm'
 DEFAULT_SSH_POD = 'ssh-test-pod'
 DEFAULT_SSH_POD_NS = 'default'
 DEFAULT_POLL_INTERVAL = 1
-DEFAULT_CONCURRENCY = 100
+DEFAULT_CONCURRENCY = 50
 DEFAULT_PING_TIMEOUT = 600  # 10 minutes
 DEFAULT_NAMESPACE_PREFIX = 'kubevirt-perf-test'
 
@@ -187,6 +188,29 @@ Examples:
         '--save-results',
         action='store_true',
         help='Save detailed results (JSON and CSV) inside a timestamped folder under results/.'
+    )
+
+    # Base folder for results
+    parser.add_argument(
+        '--results-folder',
+        type=str,
+        default='results',
+        help='Base directory to store test results (default: ./results)'
+    )
+
+    # Portworx version grouping
+    parser.add_argument(
+        '--px-version',
+        type=str,
+        default=None,
+        help='Portworx version to include in results path (auto-detect if not provided)'
+    )
+
+    parser.add_argument(
+        '--px-namespace',
+        type=str,
+        default="portworx",
+        help='Default namespace where Portworx is installed'
     )
 
     
@@ -532,7 +556,44 @@ def main():
     logger.info(f"Poll interval: {args.poll_interval}s")
     logger.info(f"Ping timeout: {args.ping_timeout}s")
     logger.info("=" * 80)
-    
+    NUM_DISKS_PER_VM = 1
+
+    if not args.px_version:
+        args.px_version = get_px_version_from_cluster(logger, namespace=args.px_namespace)
+    else:
+        logger.info(f"Using provided PX version: {args.px_version}")
+
+    try:
+        with open(args.vm_template, 'r') as f:
+            # Load *all* YAML docs
+            docs = list(yaml.safe_load_all(f))
+
+        # Find the VirtualMachine document
+        vm_spec = next((doc for doc in docs if doc and doc.get('kind') == 'VirtualMachine'), None)
+
+        if not vm_spec:
+            raise ValueError("No VirtualMachine document found in the YAML file")
+
+        # Get list of volumes under spec.template.spec.volumes
+        volumes = (
+            vm_spec.get('spec', {})
+            .get('template', {})
+            .get('spec', {})
+            .get('volumes', [])
+        )
+
+        # Exclude cloudInit volumes
+        non_cloudinit_volumes = [
+            v for v in volumes
+            if not any(k in v for k in ['cloudInitNoCloud', 'cloudInitConfigDrive'])
+        ]
+
+        NUM_DISKS_PER_VM = len(non_cloudinit_volumes)
+        logger.info(f"Detected {NUM_DISKS_PER_VM} disks (excluding cloud-init) in VM template")
+
+    except Exception as e:
+        logger.error(f"Failed to parse {args.vm_template}: {e}")
+
     # Validate prerequisites
     if not validate_prerequisites(args.ssh_pod, args.ssh_pod_ns, logger):
         logger.error("Prerequisites validation failed")
@@ -637,12 +698,22 @@ def main():
     if args.save_results:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         suffix = f"{args.namespace_prefix}_{args.start}-{args.end}"
-        out_dir = os.path.join("results", f"{timestamp}_{suffix}")
+
+        # Construct versioned results path dynamically
+        out_dir = os.path.join(args.results_folder, args.px_version, f"{NUM_DISKS_PER_VM}-disk", f"{timestamp}_{suffix}")
         os.makedirs(out_dir, exist_ok=True)
+
         logger.info(f"Created results directory: {out_dir}")
 
         # Save initial creation test results
-        save_results(args, results, base_dir=out_dir, prefix="vm_creation_results", logger=logger, total_time=total_elapsed)
+        save_results(
+            args,
+            results,
+            base_dir=out_dir,
+            prefix="vm_creation_results",
+            logger=logger,
+            total_time=total_elapsed
+        )
         logger.info(f"Detailed and summary results saved under: {out_dir}")
     else:
         logger.info("VM Creation Performance Test Results not saved (use --save-results to enable).")

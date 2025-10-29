@@ -2,3 +2,4 @@
 # Python 3.6+ required
 
 pandas~=2.3.3
+pyyaml~=6.0.3

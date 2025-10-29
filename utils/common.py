@@ -1183,12 +1183,12 @@ def save_results(args, results, base_dir="results", prefix="vm_creation_results"
     for ns, run_t, ping_t, clone_t, success in results:
         entry = {
             "namespace": ns,
-            "running_time_sec": run_t,
-            "ping_time_sec": ping_t,
+            "running_time_sec": round(run_t, 2) if run_t is not None else None,
+            "ping_time_sec": round(ping_t, 2) if ping_t is not None else None,
             "success": bool(success),
         }
         if not skip_clone:
-            entry["clone_duration_sec"] = clone_t
+            entry["clone_duration_sec"] = round(clone_t, 2) if clone_t is not None else None
         data.append(entry)
 
     # Save detailed JSON
@@ -1407,3 +1407,37 @@ def validate_prerequisites(ssh_pod: str, ssh_pod_ns: str, logger: logging.Logger
     
     return True
 
+def get_px_version_from_cluster(logger=None, namespace="portworx") -> str:
+    """
+    Detect Portworx version from the running StorageCluster (stc) in namespace 'portworx'.
+    Returns the version string or 'unknown' if not found.
+    """
+    try:
+        cmd = [
+            "kubectl", "get", "stc", "-n", f"{namespace}",
+            "-o", "jsonpath={.items[0].status.version}"
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        version = result.stdout.strip()
+        if not version:
+            # Try alternate spec path if status not found
+            cmd_alt = [
+                "kubectl", "get", "stc", "-n", f"{namespace}",
+                "-o", "jsonpath={.items[0].spec.version}"
+            ]
+            result = subprocess.run(cmd_alt, capture_output=True, text=True, timeout=10)
+            version = result.stdout.strip()
+
+        if version:
+            if logger:
+                logger.info(f"Detected Portworx version from cluster: {version}")
+            return version
+        else:
+            if logger:
+                logger.warning("Unable to detect Portworx version — defaulting to 'unknown'")
+            return "unknown"
+
+    except Exception as e:
+        if logger:
+            logger.warning(f"Error detecting Portworx version: {e}")
+        return "unknown"
