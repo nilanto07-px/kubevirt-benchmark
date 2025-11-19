@@ -177,6 +177,16 @@ Examples:
         help='Base directory to store test results (default: ../results)'
     )
 
+    parser.add_argument(
+        '--interleaved-scheduling',
+        action='store_true',
+        help='Distribute parallel migration threads in interleaved pattern across nodes. '
+             'Instead of sequential (1,2,3,...), distributes VMs evenly across nodes first. '
+             'Example: With 400 VMs and 5 nodes, processes VMs in order: 1,81,161,241,321,2,82,162,... '
+             'This ensures even load distribution across all nodes from the start, preventing '
+             'hotspots and improving overall migration performance.'
+    )
+
     return parser.parse_args()
 
 
@@ -291,14 +301,21 @@ def wait_for_vms_running(namespaces: List[str], vm_name: str, timeout: int, logg
     return results
 
 
-def migrate_vm_sequential(ns: str, vm_name: str, target_node: Optional[str],
-                         migration_timeout: int, logger) -> Tuple[str, bool, float, Optional[str], Optional[str], Optional[float]]:
+def migrate_vm_sequential(
+    ns: str,
+    vm_name: str,
+    target_node: Optional[str],
+    migration_timeout: int,
+    logger,
+    max_retries: int = 10,
+    retry_delay: int = 2
+) -> Tuple[str, bool, float, Optional[str], Optional[str], Optional[float]]:
     """
     Migrate a single VM and measure time.
 
-    Returns:
-        Tuple of (namespace, success, observed_duration, source_node, target_node, vmim_duration)
+    Retries VMIM creation up to `max_retries` times if webhook/internal errors occur.
     """
+
     try:
         # Get source node
         source_node = get_vm_node(vm_name, ns, logger)
@@ -308,8 +325,24 @@ def migrate_vm_sequential(ns: str, vm_name: str, target_node: Optional[str],
 
         logger.info(f"[{ns}] Starting migration from {source_node}")
 
-        # Trigger migration
-        if not migrate_vm(vm_name, ns, target_node, logger):
+        # --- Retry VMIM creation only ---
+        for attempt in range(1, max_retries + 1):
+            try:
+                if migrate_vm(vm_name, ns, target_node, logger):
+                    break
+                else:
+                    logger.warning(f"[{ns}] Failed to trigger migration (attempt {attempt}/{max_retries})")
+            except Exception as e:
+                err_str = str(e)
+                logger.warning(f"[{ns}] Exception creating VMIM (attempt {attempt}/{max_retries}): {err_str}")
+
+            # backoff before next retry
+            if attempt < max_retries:
+                logger.info(f"[{ns}] Retrying VMIM creation in {retry_delay}s...")
+                time.sleep(retry_delay)
+        else:
+            # ran out of retries
+            logger.error(f"[{ns}] Failed to create VMIM after {max_retries} attempts")
             return ns, False, 0.0, source_node, None, None
 
         # Wait for migration to complete
@@ -565,14 +598,45 @@ def main():
 
     # Scenario 2: Parallel Migration
     elif args.parallel and not args.evacuate and not args.round_robin:
-        logger.info(f"\nParallel migration from {args.source_node or 'auto-selected node'} to {args.target_node or 'auto-selected node'}")
+        logger.info(f"\nParallel migration from {args.source_node or 'auto-selected node'} "
+                    f"to {args.target_node or 'auto-selected node'}")
         logger.info(f"Concurrency: {args.concurrency}")
 
+        # Detect available nodes
+        available_nodes = get_worker_nodes(logger)
+        num_nodes = len(available_nodes) if available_nodes else 1
+        logger.info(f"Found {num_nodes} worker nodes: {', '.join(available_nodes) if available_nodes else 'N/A'}")
+
+        # Default: sequential namespace order
+        reordered_namespaces = namespaces
+
+        # --- Interleaved scheduling ---
+        if args.interleaved_scheduling:
+            total_namespaces = len(namespaces)
+            group_size = total_namespaces // num_nodes or 1
+
+            reordered_namespaces = []
+            for offset in range(group_size):
+                for i in range(offset, total_namespaces, group_size):
+                    reordered_namespaces.append(namespaces[i])
+
+            logger.info(f"Detected {num_nodes} available nodes for interleaved scheduling")
+            logger.info(f"Reordered namespaces for interleaved scheduling (stride={group_size}). "
+                        f"First 10: {reordered_namespaces[:10]}")
+        else:
+            logger.info("Using default sequential namespace order for parallel scheduling")
+
+        # --- Parallel migration execution ---
         with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
             futures = {
-                executor.submit(migrate_vm_sequential, ns, args.vm_name, args.target_node,
-                              args.migration_timeout, logger): ns
-                for ns in namespaces
+                executor.submit(
+                    migrate_vm_sequential,
+                    ns,
+                    args.vm_name,
+                    args.target_node,
+                    args.migration_timeout,
+                    logger
+                ): ns for ns in reordered_namespaces
             }
 
             for future in as_completed(futures):

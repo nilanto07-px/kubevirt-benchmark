@@ -17,6 +17,7 @@ Usage:
 import json
 import argparse
 import pandas as pd
+import yaml
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -41,6 +42,71 @@ def load_json(path: Path):
     except Exception:
         return None
 
+def load_cluster_info(yaml_path: str):
+    """Load cluster info YAML for a single cluster."""
+    path = Path(yaml_path)
+    if not path.exists():
+        print(f"Cluster info file not found: {yaml_path}")
+        return None
+
+    try:
+        with open(path, "r") as f:
+            data = yaml.safe_load(f)
+        return data.get("cluster", {})
+    except Exception as e:
+        print(f"⚠️  Failed to parse {yaml_path}: {e}")
+        return None
+
+def build_cluster_info_tab(cluster_info: dict) -> str:
+    """Render the cluster info as an HTML table with auto-generated labels from keys."""
+    if not cluster_info:
+        return "<p>No cluster information provided.</p>"
+
+    rows = ""
+    for key, value in cluster_info.items():
+        label = key.replace("_", " ").upper()
+
+        if isinstance(value, str) and "\n" in value:
+            rows += f"<tr><th>{label}</th><td><pre style='margin:0;white-space:pre-wrap'>{value.strip()}</pre></td></tr>"
+        else:
+            rows += f"<tr><th>{label}</th><td>{value}</td></tr>"
+
+    return f"<table class='table table-bordered w-auto'><tbody>{rows}</tbody></table>"
+
+def load_manual_results(yaml_path: str):
+    """Load manual results YAML."""
+    path = Path(yaml_path)
+    if not path.exists():
+        print(f"Manual results file not found: {yaml_path}")
+        return None
+    try:
+        with open(path, "r") as f:
+            data = yaml.safe_load(f)
+        return data.get("results", [])
+    except Exception as e:
+        print(f"⚠️  Failed to parse {yaml_path}: {e}")
+        return None
+
+
+def build_manual_results_tab(manual_results: list) -> str:
+    """Render manual results as an interactive table."""
+    if not manual_results:
+        return "<p>No manual results provided.</p>"
+
+    df = pd.DataFrame(manual_results)
+    if df.empty:
+        return "<p>Manual results file is empty.</p>"
+
+    # Round any numeric columns and apply friendly names
+    numeric_cols = df.select_dtypes(include="number").columns
+    df[numeric_cols] = df[numeric_cols].round(2)
+
+    return df.to_html(
+        classes="display compact nowrap",
+        table_id="table_manual_results",
+        index=False,
+        border=0
+    )
 
 def format_folder_name(folder_name: str) -> str:
     """Convert '20251014-165952_kubevirt-perf-test_1-50' → '2025-10-14 16:59:52 — 50 VMs'"""
@@ -479,6 +545,9 @@ def main():
     parser.add_argument("--days", type=int, default=15)
     parser.add_argument("--base-dir", type=str, default="results")
     parser.add_argument("--output-html", type=str, default="results_dashboard.html")
+    parser.add_argument("--cluster-info", type=str, help="Path to cluster_info.yaml file", default=None)
+    parser.add_argument("--manual-results", type=str, help="Path to manual_results.yaml file", default=None)
+
     args = parser.parse_args()
 
     base_dir = Path(args.base_dir)
@@ -510,6 +579,23 @@ def main():
         show_cls = "show" if idx == 0 else ""
         px_nav.append(f'<li class="nav-item"><button class="nav-link {active_cls}" id="tab-{px_id}-tab" data-bs-toggle="tab" data-bs-target="#tab_{px_id}" type="button" role="tab">{px_version}</button></li>')
         px_body.append(f'<div class="tab-pane fade {show_cls} {active_cls}" id="tab_{px_id}" role="tabpanel">{build_px_tab(px_version, disk_map)}</div>')
+
+    cluster_info = load_cluster_info(args.cluster_info) if args.cluster_info else None
+
+    if cluster_info:
+        cluster_html = build_cluster_info_tab(cluster_info)
+        px_nav.append(
+            '<li class="nav-item"><button class="nav-link" id="tab-clusterinfo-tab" data-bs-toggle="tab" data-bs-target="#tab_clusterinfo" type="button" role="tab">Cluster Info</button></li>')
+        px_body.append(f'<div class="tab-pane fade" id="tab_clusterinfo" role="tabpanel">{cluster_html}</div>')
+
+    manual_results = load_manual_results(args.manual_results) if args.manual_results else None
+    if manual_results:
+        manual_html = build_manual_results_tab(manual_results)
+        px_nav.append(
+            '<li class="nav-item"><button class="nav-link" id="tab-manualresults-tab" '
+            'data-bs-toggle="tab" data-bs-target="#tab_manualresults" type="button" role="tab">Manual Results</button></li>'
+        )
+        px_body.append(f'<div class="tab-pane fade" id="tab_manualresults" role="tabpanel">{manual_html}</div>')
 
     out = Path(args.output_html)
     out.write_text(build_html_page(px_nav, px_body), encoding="utf-8")

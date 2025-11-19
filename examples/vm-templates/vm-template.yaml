@@ -38,10 +38,6 @@ spec:
   runStrategy: Always
   template:
     spec:
-     
-
-
-  
       domain:
         cpu:
           cores: {{VM_CPU_CORES}}
@@ -60,9 +56,6 @@ spec:
             # - name: data-disk-2
             #   disk:
             #     bus: virtio
-  
-            
-
           interfaces:
             - masquerade: {}
               name: default

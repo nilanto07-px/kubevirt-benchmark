@@ -8,7 +8,7 @@ __pycache__/
 .venv/
 venv/
 env/
-results/
+results*/
 excluded-results/
 
 # Logs
