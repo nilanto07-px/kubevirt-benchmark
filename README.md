@@ -6,14 +6,35 @@ A comprehensive performance testing toolkit for KubeVirt virtual machines runnin
 
 This suite provides automated performance testing tools to measure and validate KubeVirt VM provisioning, boot times, network readiness, and failure recovery scenarios. It's designed for production environments running OpenShift Virtualization with Portworx as the storage backend.
 
+## New: virtbench CLI
+
+The suite now includes **virtbench**, a unified command-line interface that provides a professional, kubectl-like experience for all benchmarks.
+
+```bash
+# Install the CLI
+./install.sh
+
+# Run benchmarks with a single command
+virtbench capacity-benchmark --storage-class fada-raw-sc --vms 5
+virtbench datasource-clone --storage-class fada-raw-sc --vms 50
+virtbench migration --storage-class fada-raw-sc --namespaces 10
+```
+
+See [CLI_README.md](CLI_README.md) for complete CLI documentation.
+
 ## Features
 
+- **Unified CLI Interface**: Professional kubectl-like CLI with shell completion
 - **VM Creation Performance Testing**: Measure VM provisioning and boot times at scale
+- **Capacity Benchmark Testing**: Test cluster limits with 5-phase testing (create, resize, restart, snapshot, migrate)
 - **Boot Storm Testing**: Test VM startup performance when powering on multiple VMs simultaneously
 - **Live Migration Testing**: Measure VM live migration performance across different scenarios
+- **Capacity Benchmark Testing**: Test cluster capacity limits with comprehensive VM operations (create, resize, restart, snapshot, migrate)
 - **Single Node Testing**: Pin all VMs to a single node for node-level capacity testing
 - **Network Readiness Validation**: Test VM network connectivity and measure time-to-ready
 - **Failure and Recovery Testing**: Validate VM recovery times after node failures
+- **VM Snapshot Testing**: Test VM snapshot creation and readiness
+- **Volume Resize Testing**: Test PVC expansion capabilities
 - **Parallel Execution**: Support for testing hundreds of VMs concurrently
 - **Parallel Namespace Creation**: Create namespaces in batches for faster test setup
 - **Multiple Storage Backends**: Support for both standard Portworx and Pure FlashArray Direct Access (FADA)
@@ -27,6 +48,7 @@ This suite provides automated performance testing tools to measure and validate 
 - OpenShift Container Platform 4.x with OpenShift Virtualization
 - Portworx Enterprise 2.x or later
 - Python 3.6 or later
+- Go 1.21 or later (for building virtbench CLI)
 - kubectl CLI configured with cluster access
 - Bash shell (for helper scripts)
 
@@ -48,12 +70,32 @@ The user running these tests needs:
 ```
 kubevirt-benchmark-suite/
 ├── README.md                          # This file
+├── CLI_README.md                      # virtbench CLI documentation
 ├── QUICKSTART.md                      # 5-minute quick start guide
 ├── SETUP.md                           # Detailed setup instructions
 ├── CLEANUP_GUIDE.md                   # Comprehensive cleanup guide
 ├── CONTRIBUTING.md                    # Contribution guidelines
 ├── LICENSE                            # Apache 2.0 License
 ├── requirements.txt                   # Python dependencies
+├── go.mod                             # Go module file
+├── go.sum                             # Go dependencies
+├── Makefile                           # Build automation
+├── install.sh                         # Installation script
+│
+├── cmd/virtbench/                     # virtbench CLI source code
+│   ├── main.go                       # CLI entry point
+│   ├── root.go                       # Root command
+│   ├── common.go                     # Common utilities
+│   ├── datasource_clone.go           # DataSource clone subcommand
+│   ├── migration.go                  # Migration subcommand
+│   ├── capacity_benchmark.go         # Capacity benchmark subcommand
+│   ├── failure_recovery.go           # Failure recovery subcommand
+│   ├── validate_cluster.go           # Cluster validation subcommand
+│   ├── version.go                    # Version subcommand
+│   └── completion.go                 # Shell completion subcommand
+│
+├── bin/                               # Built binaries (generated)
+│   └── virtbench                     # virtbench CLI binary
 │
 ├── dashboard/                        # Interactive dashboard for test results
 │   └── generate_dashboard.py         # Dashboard generation script
@@ -63,6 +105,10 @@ kubevirt-benchmark-suite/
 │
 ├── migration/                         # Live migration performance tests
 │   └── measure-vm-migration-time.py  # Main migration test script
+│
+├── capacity-benchmark/                # Capacity benchmark tests
+│   ├── measure-capacity.py           # Main capacity test script
+│   └── README.md                     # Capacity benchmark documentation
 │
 ├── failure-recovery/                  # Failure and recovery tests
 │   ├── measure-recovery-time.py      # Recovery measurement script
@@ -92,52 +138,60 @@ kubevirt-benchmark-suite/
 
 ## Quick Start
 
-### 1. Clone the Repository
+### Option 1: Using virtbench CLI (Recommended)
 
 ```bash
+# 1. Clone the repository
 git clone https://github.com/your-org/kubevirt-benchmark-suite.git
 cd kubevirt-benchmark-suite
+
+# 2. Install virtbench CLI
+./install.sh
+
+# 3. Create SSH pod for ping tests (required for network validation)
+kubectl apply -f examples/ssh-pod.yaml
+kubectl wait --for=condition=Ready pod/ssh-test-pod -n default --timeout=300s
+
+# 4. Validate your cluster
+virtbench validate-cluster --storage-class fada-raw-sc
+
+# 5. Run a benchmark
+virtbench capacity-benchmark --storage-class fada-raw-sc --vms 5 --max-iterations 3
 ```
 
-### 2. Install Dependencies
+See [CLI_README.md](CLI_README.md) for complete CLI documentation.
+
+### Option 2: Using Python Scripts Directly
 
 ```bash
+# 1. Clone the repository
+git clone https://github.com/your-org/kubevirt-benchmark-suite.git
+cd kubevirt-benchmark-suite
+
+# 2. Install Python dependencies
 pip3 install -r requirements.txt
-```
 
-### 3. Validate Your Cluster
+# 3. Create SSH pod for ping tests (required for network validation)
+kubectl apply -f examples/ssh-pod.yaml
+kubectl wait --for=condition=Ready pod/ssh-test-pod -n default --timeout=300s
 
-Validate that your cluster is ready for benchmarks:
-
-```bash
+# 3. Validate your cluster
 python3 utils/validate_cluster.py --storage-class portworx-fada-sc
-```
 
-See [VALIDATION_GUIDE.md](VALIDATION_GUIDE.md) for detailed validation options.
-
-### 4. Configure VM Templates
-
-Apply template variables to create customized VM configurations:
-
-```bash
+# 4. Configure VM templates
 ./utils/apply_template.sh \
   --output /tmp/my-vm.yaml \
   --vm-name my-test-vm \
   --storage-class portworx-fada-sc \
   --memory 4Gi \
   --cpu-cores 2
-```
 
-See [TEMPLATE_GUIDE.md](TEMPLATE_GUIDE.md) for detailed template usage.
-
-### 5. Run a Basic Test
-
-Test VM creation with 10 VMs:
-
-```bash
+# 5. Run a basic test
 cd datasource-clone
 python3 measure-vm-creation-time.py --start 1 --end 10 --vm-name rhel-9-vm
 ```
+
+See [TEMPLATE_GUIDE.md](TEMPLATE_GUIDE.md) for detailed template usage.
 
 ## Testing Scenarios
 
@@ -166,7 +220,29 @@ Tests VM startup performance on a single node when powering on multiple VMs simu
 
 **Use Case**: Validates node-level capacity and boot storm performance (e.g., how many VMs can a single node handle during boot storm).
 
-**Example**:
+**Example (virtbench CLI)**:
+```bash
+# Run test on a single node (auto-selected)
+virtbench datasource-clone \
+  --start 1 \
+  --end 50 \
+  --vm-name rhel-9-vm \
+  --single-node \
+  --boot-storm \
+  --log-file single-node-boot-storm-$(date +%Y%m%d-%H%M%S).log
+
+# Or specify a specific node
+virtbench datasource-clone \
+  --start 1 \
+  --end 50 \
+  --vm-name rhel-9-vm \
+  --single-node \
+  --node-name worker-node-1 \
+  --boot-storm \
+  --log-file single-node-boot-storm-$(date +%Y%m%d-%H%M%S).log
+```
+
+**Example (Python script)**:
 ```bash
 cd datasource-clone
 
@@ -216,7 +292,18 @@ Tests VM startup performance across all nodes when powering on multiple VMs simu
 
 **Use Case**: Validates cluster-wide performance under boot storm conditions (e.g., after maintenance, power outage recovery).
 
-**Example**:
+**Example (virtbench CLI)**:
+```bash
+# Run test with boot storm (VMs distributed across all nodes)
+virtbench datasource-clone \
+  --start 1 \
+  --end 100 \
+  --vm-name rhel-9-vm \
+  --boot-storm \
+  --log-file boot-storm-$(date +%Y%m%d-%H%M%S).log
+```
+
+**Example (Python script)**:
 ```bash
 cd datasource-clone
 
@@ -340,7 +427,65 @@ python3 measure-vm-migration-time.py --start 1 --end 100 --create-vms --cleanup
 
 ---
 
-### Scenario 5: Failure and Recovery Testing
+### Scenario 5: Capacity Benchmark Testing
+
+Tests cluster capacity limits by running comprehensive VM operations in a loop until failure.
+
+**Use Case**: Discover maximum VM capacity, test volume expansion limits, validate snapshot functionality, and stress-test the cluster.
+
+**Example - Basic Capacity Test**:
+```bash
+cd capacity-benchmark
+
+# Run capacity test with default settings (5 VMs per iteration)
+python3 measure-capacity.py --storage-class portworx-fada-sc
+
+# Run with custom VM count
+python3 measure-capacity.py --storage-class portworx-fada-sc --vms 10
+
+# Run with maximum iterations limit
+python3 measure-capacity.py --storage-class portworx-fada-sc --max-iterations 5
+```
+
+**Example - Skip Specific Phases**:
+```bash
+# Test only VM creation capacity (skip resize, restart, snapshot, migration)
+python3 measure-capacity.py \
+  --storage-class portworx-fada-sc \
+  --vms 10 \
+  --skip-resize-job \
+  --skip-restart-job \
+  --skip-snapshot-job \
+  --skip-migration-job
+
+# Test volume expansion limits
+python3 measure-capacity.py \
+  --storage-class portworx-fada-sc \
+  --vms 5 \
+  --min-vol-size 30Gi \
+  --min-vol-inc-size 20Gi \
+  --max-iterations 10
+```
+
+**What it does**:
+1. **Phase 1**: Creates VMs with multiple data volumes
+2. **Phase 2**: Resizes root and data volumes (tests volume expansion)
+3. **Phase 3**: Restarts VMs (tests VM lifecycle)
+4. **Phase 4**: Creates VM snapshots (tests snapshot functionality)
+5. **Phase 5**: Migrates VMs (tests live migration)
+6. Repeats until failure or max iterations reached
+
+**Cleanup**:
+```bash
+# Cleanup resources after test
+python3 measure-capacity.py --cleanup-only
+```
+
+**See detailed documentation**: `capacity-benchmark/README.md`
+
+---
+
+### Scenario 6: Failure and Recovery Testing
 
 Tests VM recovery time after simulated node failures using Fence Agents Remediation (FAR).
 
