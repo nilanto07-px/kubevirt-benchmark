@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -35,6 +36,7 @@ var (
 	migNamespacePrefix       string
 	migCreateVMs             bool
 	migVMTemplate            string
+	migStorageClass          string
 	migSingleNode            bool
 	migNodeName              string
 	migSourceNode            string
@@ -75,6 +77,7 @@ func init() {
 	// VM creation
 	migrationCmd.Flags().BoolVar(&migCreateVMs, "create-vms", false, "create VMs before migration (default: use existing VMs)")
 	migrationCmd.Flags().StringVar(&migVMTemplate, "vm-template", "examples/vm-templates/rhel9-vm-datasource.yaml", "VM template YAML file")
+	migrationCmd.Flags().StringVar(&migStorageClass, "storage-class", "", "storage class name (overrides template value)")
 	migrationCmd.Flags().BoolVar(&migSingleNode, "single-node", false, "create all VMs on a single node (requires --create-vms)")
 	migrationCmd.Flags().StringVar(&migNodeName, "node-name", "", "specific node to create VMs on (requires --single-node and --create-vms)")
 
@@ -124,6 +127,19 @@ func runMigration(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to get repository root: %w", err)
 		}
 		vmTemplatePath = filepath.Join(repoRoot, vmTemplatePath)
+	}
+
+	// If storage class is specified, modify the template
+	if migStorageClass != "" {
+		fmt.Printf("Modifying template to use storage class: %s\n", migStorageClass)
+		modifiedPath, err := modifyStorageClassInYAML(vmTemplatePath, migStorageClass)
+		if err != nil {
+			return fmt.Errorf("failed to modify storage class in template: %w", err)
+		}
+		// Clean up temp file after script completes
+		defer os.Remove(modifiedPath)
+		vmTemplatePath = modifiedPath
+		fmt.Printf("Using modified template: %s\n", modifiedPath)
 	}
 
 	// Build arguments for Python script

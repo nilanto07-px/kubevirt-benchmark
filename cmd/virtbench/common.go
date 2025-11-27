@@ -2,11 +2,14 @@ package main
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // getRepoRoot returns the root directory of the repository
@@ -151,4 +154,62 @@ func printBanner(title string) {
 	fmt.Printf("  %s\n", title)
 	fmt.Println(strings.Repeat("=", 80))
 	fmt.Println()
+}
+
+// modifyStorageClassInYAML modifies the storageClassName in a VM template YAML file
+// and returns the path to the modified temporary file
+func modifyStorageClassInYAML(templatePath, storageClass string) (string, error) {
+	// Read the YAML file
+	data, err := ioutil.ReadFile(templatePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read template file: %w", err)
+	}
+
+	// Parse YAML
+	var doc map[string]interface{}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return "", fmt.Errorf("failed to parse YAML: %w", err)
+	}
+
+	// Navigate to dataVolumeTemplates and update storageClassName
+	modified := false
+	if spec, ok := doc["spec"].(map[string]interface{}); ok {
+		if dvTemplates, ok := spec["dataVolumeTemplates"].([]interface{}); ok {
+			for _, dvTemplate := range dvTemplates {
+				if dvt, ok := dvTemplate.(map[string]interface{}); ok {
+					if dvSpec, ok := dvt["spec"].(map[string]interface{}); ok {
+						if storage, ok := dvSpec["storage"].(map[string]interface{}); ok {
+							storage["storageClassName"] = storageClass
+							modified = true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if !modified {
+		return "", fmt.Errorf("could not find storageClassName field in template")
+	}
+
+	// Marshal back to YAML
+	modifiedData, err := yaml.Marshal(&doc)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal modified YAML: %w", err)
+	}
+
+	// Create temporary file
+	tmpFile, err := ioutil.TempFile("", "vm-template-*.yaml")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer tmpFile.Close()
+
+	// Write modified YAML to temp file
+	if _, err := tmpFile.Write(modifiedData); err != nil {
+		os.Remove(tmpFile.Name())
+		return "", fmt.Errorf("failed to write temp file: %w", err)
+	}
+
+	return tmpFile.Name(), nil
 }

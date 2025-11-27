@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -34,6 +35,7 @@ var (
 	dsNamespacePrefix     string
 	dsVMName              string
 	dsVMTemplate          string
+	dsStorageClass        string
 	dsConcurrency         int
 	dsPollInterval        int
 	dsPingTimeout         int
@@ -64,6 +66,7 @@ func init() {
 	// VM configuration
 	datasourceCloneCmd.Flags().StringVarP(&dsVMName, "vm-name", "n", "rhel-9-vm", "VM resource name")
 	datasourceCloneCmd.Flags().StringVar(&dsVMTemplate, "vm-template", "examples/vm-templates/rhel9-vm-datasource.yaml", "path to VM template YAML")
+	datasourceCloneCmd.Flags().StringVar(&dsStorageClass, "storage-class", "", "storage class name (overrides template value)")
 	datasourceCloneCmd.Flags().StringVar(&dsNamespacePrefix, "namespace-prefix", "datasource-clone", "namespace prefix")
 
 	// Performance tuning
@@ -108,6 +111,19 @@ func runDatasourceClone(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to get repository root: %w", err)
 		}
 		vmTemplatePath = filepath.Join(repoRoot, vmTemplatePath)
+	}
+
+	// If storage class is specified, modify the template
+	if dsStorageClass != "" {
+		fmt.Printf("Modifying template to use storage class: %s\n", dsStorageClass)
+		modifiedPath, err := modifyStorageClassInYAML(vmTemplatePath, dsStorageClass)
+		if err != nil {
+			return fmt.Errorf("failed to modify storage class in template: %w", err)
+		}
+		// Clean up temp file after script completes
+		defer os.Remove(modifiedPath)
+		vmTemplatePath = modifiedPath
+		fmt.Printf("Using modified template: %s\n", modifiedPath)
 	}
 
 	// Build arguments for Python script

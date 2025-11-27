@@ -89,10 +89,10 @@ python3 measure-vm-creation-time.py \
 ```
 
 **Resources Cleaned:**
-- ✅ All VMs in test namespaces
-- ✅ All DataVolumes
-- ✅ All PVCs
-- ✅ All test namespaces
+- All VMs in test namespaces
+- All DataVolumes
+- All PVCs
+- All test namespaces
 
 ### Migration Tests
 
@@ -135,9 +135,9 @@ python3 measure-vm-migration-time.py \
 ```
 
 **Resources Cleaned:**
-- ✅ All VirtualMachineInstanceMigration objects
-- ✅ VMs and namespaces (only if `--create-vms` was used)
-- ✅ Node selector modifications (automatic)
+- All VirtualMachineInstanceMigration objects
+- VMs and namespaces (only if `--create-vms` was used)
+- Node selector modifications (automatic)
 
 ### Failure Recovery Tests
 
@@ -174,10 +174,10 @@ python3 measure-recovery-time.py \
 ```
 
 **Resources Cleaned:**
-- ✅ FenceAgentsRemediation custom resources
-- ✅ FAR annotations from VMs (`vm.kubevirt.io/fenced`)
-- ✅ Uncordon failed nodes
-- ✅ VMs, DataVolumes, PVCs, namespaces (with `--cleanup-vms`)
+-  FenceAgentsRemediation custom resources
+-  FAR annotations from VMs (`vm.kubevirt.io/fenced`)
+-  Uncordon failed nodes
+-  VMs, DataVolumes, PVCs, namespaces (with `--cleanup-vms`)
 
 ## Manual Cleanup
 

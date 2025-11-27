@@ -6,21 +6,6 @@ A comprehensive performance testing toolkit for KubeVirt virtual machines runnin
 
 This suite provides automated performance testing tools to measure and validate KubeVirt VM provisioning, boot times, network readiness, and failure recovery scenarios. It's designed for production environments running OpenShift Virtualization with Portworx as the storage backend.
 
-## New: virtbench CLI
-
-The suite now includes **virtbench**, a unified command-line interface that provides a professional, kubectl-like experience for all benchmarks.
-
-```bash
-# Install the CLI
-./install.sh
-
-# Run benchmarks with a single command
-virtbench capacity-benchmark --storage-class fada-raw-sc --vms 5
-virtbench datasource-clone --storage-class fada-raw-sc --vms 50
-virtbench migration --storage-class fada-raw-sc --namespaces 10
-```
-
-See [CLI_README.md](CLI_README.md) for complete CLI documentation.
 
 ## Features
 
@@ -46,7 +31,7 @@ See [CLI_README.md](CLI_README.md) for complete CLI documentation.
 
 ### Software Requirements
 - OpenShift Container Platform 4.x with OpenShift Virtualization
-- Portworx Enterprise 2.x or later
+- Portworx Enterprise 2.x or later and PX-CSI installed
 - Python 3.6 or later
 - Go 1.21 or later (for building virtbench CLI)
 - kubectl CLI configured with cluster access
@@ -135,6 +120,56 @@ kubevirt-benchmark-suite/
     ├── evacuation-scenario.sh        # Node evacuation example
     └── round-robin-migration.sh      # Round-robin migration example
 ```
+## virtbench CLI
+
+This suite  includes **virtbench**, a unified command-line interface that provides a professional, kubectl-like experience for benchmarks.
+
+```bash
+# Install the CLI
+git clone https://github.com/your-org/kubevirt-benchmark-suite.git
+cd kubevirt-benchmark-suite
+./install.sh
+
+When using the `virtbench` CLI, the tool needs to locate the repository directory to access Python scripts and templates. The CLI automatically searches for the repository in the following order:
+Example:
+
+# Set the environment variable
+export VIRTBENCH_REPO=/path/to/kubevirt-benchmark-suite
+
+# Now you can run virtbench from anywhere
+cd /tmp
+virtbench capacity-benchmark --storage-class fada-raw-sc --vms 5
+```
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+export VIRTBENCH_REPO=/path/to/kubevirt-benchmark-suite
+```
+See [CLI_README.md](CLI_README.md) for complete CLI documentation.
+
+## Important: Configure Your Storage Class
+
+**Before running any tests, you MUST configure the storage class for your environment.**
+
+### Quick Setup (Choose One):
+
+**Option 1: Use CLI flag**
+```bash
+# Replace YOUR-STORAGE-CLASS with your actual storage class name
+virtbench datasource-clone --start 1 --end 10 --storage-class YOUR-STORAGE-CLASS
+```
+
+**Option 2: Configure all YAML templates at once**
+```bash
+# Find your storage class
+kubectl get storageclass
+
+# Replace {{STORAGE_CLASS_NAME}} in all templates
+./utils/replace-storage-class.sh YOUR-STORAGE-CLASS
+
+# Verify
+grep "storageClassName:" examples/vm-templates/*.yaml
+```
+
 
 ## Quick Start
 
@@ -178,7 +213,7 @@ kubectl wait --for=condition=Ready pod/ssh-test-pod -n default --timeout=300s
 # 3. Validate your cluster
 python3 utils/validate_cluster.py --storage-class portworx-fada-sc
 
-# 4. Configure VM templates
+# 4. Configure VM templates (Optional) 
 ./utils/apply_template.sh \
   --output /tmp/my-vm.yaml \
   --vm-name my-test-vm \
@@ -188,7 +223,13 @@ python3 utils/validate_cluster.py --storage-class portworx-fada-sc
 
 # 5. Run a basic test
 cd datasource-clone
-python3 measure-vm-creation-time.py --start 1 --end 10 --vm-name rhel-9-vm
+python3 measure-vm-creation-time.py --start 1 --end 10 --vm-name rhel-9-vm --vm-template ../examples/vm-templates/rhel9-vm-datasource.yaml
+
+# Note: To use a different storage class, either:
+# 1. Use the CLI with --storage-class flag (recommended):
+#    virtbench datasource-clone --start 1 --end 10 --storage-class your-storage-class
+# 2. Or use the replacement script:
+#    ../utils/replace-storage-class.sh your-storage-class
 ```
 
 See [TEMPLATE_GUIDE.md](TEMPLATE_GUIDE.md) for detailed template usage.
@@ -201,15 +242,26 @@ Tests VM creation using KubeVirt DataSource with Pure FlashArray Direct Access (
 
 **Use Case**: Optimal for Pure Storage FlashArray backends with direct volume access.
 
-**Example**:
+**Example (CLI)**:
+```bash
+# Run performance test with custom storage class
+virtbench datasource-clone \
+  --start 1 \
+  --end 100 \
+  --storage-class fada-raw-sc \
+  --log-file results-$(date +%Y%m%d-%H%M%S).log
+```
+
+**Example (Python script)**:
 ```bash
 cd datasource-clone
 
-# Run performance test
+# Run performance test (requires pre-configured template)
 python3 measure-vm-creation-time.py \
   --start 1 \
   --end 100 \
   --vm-name rhel-9-vm \
+  --vm-template ../examples/vm-templates/rhel9-vm-datasource.yaml \
   --save-results \
   --log-file results-$(date +%Y%m%d-%H%M%S).log
 ```
@@ -220,13 +272,13 @@ Tests VM startup performance on a single node when powering on multiple VMs simu
 
 **Use Case**: Validates node-level capacity and boot storm performance (e.g., how many VMs can a single node handle during boot storm).
 
-**Example (virtbench CLI)**:
+**Example (virtbench CLI - Recommended)**:
 ```bash
-# Run test on a single node (auto-selected)
+# Run test on a single node (auto-selected) with custom storage class
 virtbench datasource-clone \
   --start 1 \
   --end 50 \
-  --vm-name rhel-9-vm \
+  --storage-class fada-raw-sc \
   --single-node \
   --boot-storm \
   --log-file single-node-boot-storm-$(date +%Y%m%d-%H%M%S).log
@@ -235,7 +287,7 @@ virtbench datasource-clone \
 virtbench datasource-clone \
   --start 1 \
   --end 50 \
-  --vm-name rhel-9-vm \
+  --storage-class fada-raw-sc \
   --single-node \
   --node-name worker-node-1 \
   --boot-storm \
@@ -292,13 +344,13 @@ Tests VM startup performance across all nodes when powering on multiple VMs simu
 
 **Use Case**: Validates cluster-wide performance under boot storm conditions (e.g., after maintenance, power outage recovery).
 
-**Example (virtbench CLI)**:
+**Example (virtbench CLI - Recommended)**:
 ```bash
 # Run test with boot storm (VMs distributed across all nodes)
 virtbench datasource-clone \
   --start 1 \
   --end 100 \
-  --vm-name rhel-9-vm \
+  --storage-class fada-raw-sc \
   --boot-storm \
   --log-file boot-storm-$(date +%Y%m%d-%H%M%S).log
 ```
@@ -700,7 +752,7 @@ python3 dashboard/generate_dashboard.py \
 - Summary statistics across all test runs
 - Time-series visualization of performance trends
 
-> **📖 For detailed dashboard documentation, see [dashboard/README.md](dashboard/README.md)**
+> **For detailed dashboard documentation, see [dashboard/README.md](dashboard/README.md)**
 
 ## Utility Tools
 
@@ -745,21 +797,6 @@ See [TEMPLATE_GUIDE.md](TEMPLATE_GUIDE.md) for details.
 
 All test scripts support comprehensive cleanup with the following options:
 
-#### VM Creation Tests
-```bash
-# Clean up after successful test
-python3 measure-vm-creation-time.py --start 1 --end 50 --cleanup
-
-# Clean up even if test fails
-python3 measure-vm-creation-time.py --start 1 --end 50 --cleanup-on-failure
-
-# Preview what would be deleted (dry run)
-python3 measure-vm-creation-time.py --start 1 --end 50 --dry-run-cleanup
-
-# Skip confirmation prompt (use with caution)
-python3 measure-vm-creation-time.py --start 1 --end 50 --cleanup --yes
-```
-
 **What gets cleaned up:**
 - All VMs created during the test
 - All DataVolumes (DVs) associated with the VMs
@@ -775,11 +812,6 @@ python3 measure-vm-migration-time.py --start 1 --end 50 --create-vms --cleanup
 # Dry run to see what would be deleted
 python3 measure-vm-migration-time.py --start 1 --end 50 --dry-run-cleanup
 ```
-
-**What gets cleaned up:**
-- All VirtualMachineInstanceMigration (VMIM) objects
-- VMs and namespaces (only if created with `--create-vms`)
-- Node selector modifications are automatically cleaned
 
 #### Failure Recovery Tests
 ```bash
@@ -808,29 +840,6 @@ python3 measure-recovery-time.py \
 - Uncordon nodes that were marked as failed
 - Optionally: VMs, DataVolumes, PVCs, and namespaces (with `--cleanup-vms`)
 
-### Manual Cleanup
-
-If automatic cleanup fails or you need to clean up manually:
-
-```bash
-# Delete specific namespace range
-for i in {1..50}; do
-  kubectl delete namespace kubevirt-perf-test-$i &
-done
-wait
-
-# Force delete stuck namespaces
-kubectl delete namespace kubevirt-perf-test-1 --force --grace-period=0
-
-# Clean up VMIMs
-kubectl delete virtualmachineinstancemigration --all -n kubevirt-perf-test-1
-
-# Remove FAR resources
-kubectl delete fenceagentsremediation my-far-resource
-
-# Uncordon nodes
-kubectl uncordon worker-1
-```
 
 ### Safety Features
 
@@ -858,7 +867,7 @@ CLEANUP SUMMARY
   Errors:                      0
 ================================================================================
 ```
-> **📖 For comprehensive cleanup documentation, see [CLEANUP_GUIDE.md](CLEANUP_GUIDE.md)**
+> **For comprehensive cleanup documentation, see [CLEANUP_GUIDE.md](CLEANUP_GUIDE.md)**
 
 
 ## Best Practices

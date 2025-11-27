@@ -52,6 +52,42 @@ make build-all
 # The binary will be in bin/virtbench
 ```
 
+## Environment Variables
+
+### VIRTBENCH_REPO
+
+The `virtbench` CLI needs to locate the repository directory to access Python scripts and VM templates. It automatically searches in the following order:
+
+1. **`VIRTBENCH_REPO` environment variable** (if set)
+2. Current working directory
+3. Parent directory
+4. Binary location directory
+
+**When to set VIRTBENCH_REPO:**
+- Running `virtbench` from outside the repository directory
+- Binary is installed to a system location (e.g., `/usr/local/bin`)
+- You want to use a specific repository location
+
+**Example:**
+
+```bash
+# Set the environment variable
+export VIRTBENCH_REPO=/path/to/kubevirt-benchmark-suite
+
+# Now you can run virtbench from anywhere
+cd /tmp
+virtbench capacity-benchmark --storage-class fada-raw-sc --vms 5
+```
+
+**Recommended approach:**
+- **Development**: Run from within the repository directory (no need to set `VIRTBENCH_REPO`)
+- **Production**: Add to your shell profile (`.bashrc`, `.zshrc`, etc.)
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+export VIRTBENCH_REPO=/path/to/kubevirt-benchmark-suite
+```
+
 ## Usage
 
 ### Basic Commands
@@ -84,41 +120,73 @@ virtbench validate-cluster --storage-class fada-raw-sc
 #### 1. DataSource Clone Benchmark
 
 ```bash
-# Run with 50 VMs across 10 namespaces
+# Run with 50 VMs (namespaces 1-50)
 virtbench datasource-clone \
-  --storage-class fada-raw-sc \
-  --vms 50 \
-  --namespaces 10
+  --start 1 \
+  --end 50 \
+  --storage-class fada-raw-sc
 
-# Run with custom DataSource
+# Run with custom VM template
 virtbench datasource-clone \
-  --storage-class fada-raw-sc \
-  --datasource-name rhel9 \
-  --datasource-namespace openshift-virtualization-os-images \
-  --vms 20
+  --start 1 \
+  --end 20 \
+  --vm-template examples/vm-templates/rhel9-vm-datasource.yaml \
+  --storage-class fada-raw-sc
 
 # Run with cleanup after test
 virtbench datasource-clone \
+  --start 1 \
+  --end 20 \
   --storage-class fada-raw-sc \
-  --vms 20 \
   --cleanup
+
+# Boot storm test (start all VMs simultaneously)
+virtbench datasource-clone \
+  --start 1 \
+  --end 10 \
+  --storage-class fada-raw-sc \
+  --boot-storm
+
+# Single node test
+virtbench datasource-clone \
+  --start 1 \
+  --end 10 \
+  --storage-class fada-raw-sc \
+  --single-node \
+  --node-name worker-1
 ```
 
 #### 2. VM Migration Benchmark
 
 ```bash
-# Run migration test with 10 namespaces
+# Run migration test with 10 VMs (namespaces 1-10)
 virtbench migration \
-  --storage-class fada-raw-sc \
-  --namespaces 10
+  --start 1 \
+  --end 10 \
+  --source-node worker-1
 
-# Run with custom VM configuration
+# Create VMs first, then migrate
 virtbench migration \
+  --start 1 \
+  --end 5 \
+  --create-vms \
+  --vm-template examples/vm-templates/rhel9-vm-datasource.yaml \
   --storage-class fada-raw-sc \
-  --vm-name rhel-9-vm \
-  --vm-memory 4096M \
-  --vm-cpu-cores 2 \
-  --namespaces 5
+  --source-node worker-1
+
+# Parallel migration
+virtbench migration \
+  --start 1 \
+  --end 10 \
+  --source-node worker-1 \
+  --parallel
+
+# Evacuate all VMs from a node
+virtbench migration \
+  --start 1 \
+  --end 10 \
+  --source-node worker-1 \
+  --evacuate
 ```
 
 #### 3. Capacity Benchmark
@@ -240,27 +308,6 @@ You can create a configuration file at `~/.virtbench.yaml` to set default values
 log-level: info
 kubeconfig: /path/to/kubeconfig
 timeout: 4h
-```
-
-## Development
-
-### Building
-
-```bash
-# Install dependencies
-make deps
-
-# Build binary
-make build
-
-# Run tests
-make test
-
-# Format code
-make fmt
-
-# Lint code
-make lint
 ```
 
 ### Project Structure

@@ -206,22 +206,22 @@ Statistics:
 ### What to Look For
 
 #### Good Performance
-- ✅ Boot storm times are 1.5-2x initial creation times
-- ✅ All or most VMs start successfully
-- ✅ Max times are within acceptable limits
-- ✅ Consistent performance across VMs
+- Boot storm times are 1.5-2x initial creation times
+- All or most VMs start successfully
+- Max times are within acceptable limits
+- Consistent performance across VMs
 
 #### Performance Issues
-- ⚠️ Boot storm times are 3x+ initial creation times
-- ⚠️ High failure rate during boot storm
-- ⚠️ Very high max times (outliers)
-- ⚠️ Wide variance in VM startup times
+- Boot storm times are 3x+ initial creation times
+- High failure rate during boot storm
+- Very high max times (outliers)
+- Wide variance in VM startup times
 
 #### Critical Issues
-- ❌ Boot storm times are 5x+ initial creation times
-- ❌ Many VMs fail to start
-- ❌ Timeouts during boot storm
-- ❌ Storage or network errors
+- Boot storm times are 5x+ initial creation times
+- Many VMs fail to start
+- Timeouts during boot storm
+- Storage or network errors
 
 ## Performance Tuning
 
@@ -426,11 +426,11 @@ See [dashboard/README.md](dashboard/README.md) for detailed dashboard usage.
 ## Summary
 
 Boot storm testing is essential for:
-- ✅ Understanding real-world recovery scenarios
-- ✅ Validating infrastructure capacity
-- ✅ Identifying performance bottlenecks
-- ✅ Planning for disaster recovery
-- ✅ Capacity planning and sizing
+- Understanding real-world recovery scenarios
+- Validating infrastructure capacity
+- Identifying performance bottlenecks
+- Planning for disaster recovery
+- Capacity planning and sizing
 
 **Recommended Workflow:**
 1. Run boot storm tests with `--save-results`
