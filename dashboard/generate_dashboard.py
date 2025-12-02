@@ -84,7 +84,7 @@ def load_manual_results(yaml_path: str):
             data = yaml.safe_load(f)
         return data.get("results", [])
     except Exception as e:
-        print(f"⚠️  Failed to parse {yaml_path}: {e}")
+        print(f"Failed to parse {yaml_path}: {e}")
         return None
 
 
@@ -194,7 +194,7 @@ def df_to_html_table(df: pd.DataFrame, table_id: str) -> str:
     df[numeric_cols] = df[numeric_cols].round(2)
 
     if "Success" in df.columns:
-        df["Success"] = df["Success"].map({True: "✅ True", False: "❌ False"})
+        df["Success"] = df["Success"].map({True: "True", False: "False"})
 
     return df.to_html(
         classes="display compact nowrap",

@@ -5,6 +5,7 @@ Version command
 import click
 from rich.console import Console
 from rich.table import Table
+import virtbench
 
 console = Console()
 
@@ -13,14 +14,14 @@ console = Console()
 def version():
     """
     Print version information
-    
+
     Displays version information for virtbench and its components.
     """
     table = Table(title="virtbench Version Information", show_header=True, header_style="bold cyan")
     table.add_column("Component", style="cyan")
     table.add_column("Version", style="green")
-    
-    table.add_row("virtbench", "1.0.0")
+
+    table.add_row("virtbench", virtbench.__version__)
     table.add_row("Python", get_python_version())
     table.add_row("Click", get_package_version('click'))
     table.add_row("Rich", get_package_version('rich'))
