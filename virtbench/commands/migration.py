@@ -31,6 +31,8 @@ console = Console()
 @click.option('--concurrency', '-c', default=10, type=int, help='Max parallel threads')
 @click.option('--poll-interval', default=5, type=int, help='Seconds between status checks')
 @click.option('--migration-timeout', default=600, type=int, help='Timeout for migration in seconds')
+@click.option('--max-migration-retries', default=3, type=int,
+              help='Maximum retries for failed migrations (default: 3)')
 @click.option('--vm-startup-timeout', default=3600, type=int,
               help='Timeout waiting for VMs to reach Running state (default: 3600s = 1 hour)')
 @click.option('--ping-timeout', default=3600, type=int,
@@ -121,6 +123,7 @@ def migration(ctx, **kwargs):
         'concurrency': kwargs['concurrency'],
         'poll-interval': kwargs['poll_interval'],
         'migration-timeout': kwargs['migration_timeout'],
+        'max-migration-retries': kwargs['max_migration_retries'],
         'vm-startup-timeout': kwargs['vm_startup_timeout'],
         'ping-timeout': kwargs['ping_timeout'],
         'ssh-pod': kwargs['ssh_pod'],

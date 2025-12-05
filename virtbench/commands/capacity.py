@@ -15,24 +15,32 @@ console = Console()
 
 
 @click.command('capacity-benchmark')
-@click.option('--storage-class', required=True, help='Storage class name (REQUIRED)')
+@click.option('--storage-class', required=False, help='Storage class name (required unless --cleanup-only)')
+@click.option('--namespace', '-n', default='virt-capacity-benchmark', help='Namespace for test resources')
 @click.option('--vms', default=5, type=int, help='Number of VMs to create per iteration')
-@click.option('--max-iterations', default=10, type=int, help='Maximum number of iterations')
-@click.option('--vm-template',
-              default='examples/vm-templates/rhel9-vm-datasource.yaml',
-              help='Path to VM template YAML')
-@click.option('--namespace-prefix', default='capacity-test', help='Namespace prefix')
+@click.option('--max-iterations', default=0, type=int, help='Maximum number of iterations (0 for unlimited)')
+@click.option('--data-volume-count', default=9, type=int, help='Number of data volumes per VM')
+@click.option('--min-vol-size', default='30Gi', help='Minimum volume size')
+@click.option('--min-vol-inc-size', default='10Gi', help='Minimum volume size increment')
+@click.option('--vm-yaml', default='examples/vm-templates/vm-template.yaml',
+              help='Path to VM YAML template')
+@click.option('--vm-name', default='rhel-9-vm', help='Base VM name')
+@click.option('--datasource-name', default='rhel9', help='DataSource name')
+@click.option('--datasource-namespace', default='openshift-virtualization-os-images',
+              help='DataSource namespace')
+@click.option('--vm-memory', default='2048M', help='VM memory')
+@click.option('--vm-cpu-cores', default=1, type=int, help='VM CPU cores')
+@click.option('--skip-resize-job', is_flag=True, help='Skip volume resize job')
+@click.option('--skip-migration-job', is_flag=True, help='Skip migration job')
+@click.option('--skip-snapshot-job', is_flag=True, help='Skip snapshot job')
+@click.option('--skip-restart-job', is_flag=True, help='Skip restart job')
 @click.option('--concurrency', '-c', default=10, type=int, help='Max parallel threads')
 @click.option('--poll-interval', default=5, type=int, help='Seconds between status checks')
-@click.option('--ping-timeout', default=300, type=int, help='Timeout for ping tests in seconds')
-@click.option('--ssh-pod', default='ssh-test-pod', help='Pod name for ping tests')
-@click.option('--ssh-pod-ns', default='default', help='Namespace for SSH test pod')
 @click.option('--cleanup/--no-cleanup', default=False, help='Delete test resources after completion')
-@click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompts')
-@click.option('--save-results', is_flag=True, help='Save detailed results to results folder')
-@click.option('--results-folder', default='../results', help='Base directory to store test results')
-@click.option('--storage-version', help='Storage version to include in results path (optional)')
+@click.option('--cleanup-only', is_flag=True, help='Only cleanup resources from previous runs')
 @click.option('--log-file', type=click.Path(), help='Log file path (auto-generated if not specified)')
+@click.option('--log-level', default='INFO', type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR']),
+              help='Logging level')
 @click.pass_context
 def capacity_benchmark(ctx, **kwargs):
     """
@@ -49,23 +57,68 @@ def capacity_benchmark(ctx, **kwargs):
       # Run with custom max iterations
       virtbench capacity-benchmark --storage-class YOUR-STORAGE-CLASS --vms 5 --max-iterations 20
 
-      # Run with cleanup after test
-      virtbench capacity-benchmark --storage-class YOUR-STORAGE-CLASS --vms 5 --cleanup
+      # Skip specific jobs
+      virtbench capacity-benchmark --storage-class YOUR-STORAGE-CLASS --skip-resize-job --skip-migration-job
+
+      # Cleanup only mode
+      virtbench capacity-benchmark --cleanup-only
     """
     print_banner("Capacity Benchmark")
-    
+
     # Get repo root from context
     repo_root = ctx.obj.repo_root
-    
+
+    # Validate: storage-class is required unless cleanup-only
+    if not kwargs['cleanup_only'] and not kwargs.get('storage_class'):
+        console.print("[red]Error: --storage-class is required unless using --cleanup-only[/red]")
+        sys.exit(1)
+
+    # Build Python script command
+    script_path = repo_root / 'capacity-benchmark' / 'measure-capacity.py'
+
+    if not script_path.exists():
+        console.print(f"[red]Error: Script not found: {script_path}[/red]")
+        sys.exit(1)
+
+    # Handle cleanup-only mode
+    if kwargs['cleanup_only']:
+        python_args = {
+            'namespace': kwargs['namespace'],
+            'log-level': kwargs['log_level'],
+        }
+        python_args['cleanup-only'] = True
+
+        # Add log-file
+        if kwargs.get('log_file'):
+            python_args['log-file'] = kwargs['log_file']
+        elif ctx.obj.log_file:
+            python_args['log-file'] = ctx.obj.log_file
+        else:
+            python_args['log-file'] = generate_log_filename('capacity-benchmark')
+
+        cmd = build_python_command(script_path, python_args)
+        console.print(f"[dim]Running: {' '.join(cmd[:2])} ...[/dim]")
+        console.print()
+
+        try:
+            result = subprocess.run(cmd, cwd=repo_root)
+            sys.exit(result.returncode)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Interrupted by user[/yellow]")
+            sys.exit(130)
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/red]")
+            sys.exit(1)
+
     # Resolve template path
-    template_path = Path(kwargs['vm_template'])
+    template_path = Path(kwargs['vm_yaml'])
     if not template_path.is_absolute():
         template_path = repo_root / template_path
-    
+
     if not template_path.exists():
         console.print(f"[red]Error: Template file not found: {template_path}[/red]")
         sys.exit(1)
-    
+
     # Handle storage class modification
     console.print(f"[cyan]Using storage class: {kwargs['storage_class']}[/cyan]")
     try:
@@ -73,41 +126,41 @@ def capacity_benchmark(ctx, **kwargs):
     except Exception as e:
         console.print(f"[red]Error modifying storage class: {e}[/red]")
         sys.exit(1)
-    
-    # Build Python script command
-    script_path = repo_root / 'capacity-benchmark' / 'measure-capacity.py'
-    
-    if not script_path.exists():
-        console.print(f"[red]Error: Script not found: {script_path}[/red]")
-        sys.exit(1)
-    
+
     # Map CLI args to Python script args
     python_args = {
+        'storage-class': kwargs['storage_class'],
+        'namespace': kwargs['namespace'],
         'vms': kwargs['vms'],
         'max-iterations': kwargs['max_iterations'],
-        'vm-template': str(template_path),
-        'namespace-prefix': kwargs['namespace_prefix'],
+        'data-volume-count': kwargs['data_volume_count'],
+        'min-vol-size': kwargs['min_vol_size'],
+        'min-vol-inc-size': kwargs['min_vol_inc_size'],
+        'vm-yaml': str(template_path),
+        'vm-name': kwargs['vm_name'],
+        'datasource-name': kwargs['datasource_name'],
+        'datasource-namespace': kwargs['datasource_namespace'],
+        'vm-memory': kwargs['vm_memory'],
+        'vm-cpu-cores': kwargs['vm_cpu_cores'],
         'concurrency': kwargs['concurrency'],
         'poll-interval': kwargs['poll_interval'],
-        'ping-timeout': kwargs['ping_timeout'],
-        'ssh-pod': kwargs['ssh_pod'],
-        'ssh-pod-ns': kwargs['ssh_pod_ns'],
-        'results-folder': kwargs['results_folder'],
-        'log-level': ctx.obj.log_level.upper(),
+        'log-level': kwargs['log_level'],
     }
 
-    # Add boolean flags
+    # Add skip flags
+    if kwargs['skip_resize_job']:
+        python_args['skip-resize-job'] = True
+    if kwargs['skip_migration_job']:
+        python_args['skip-migration-job'] = True
+    if kwargs['skip_snapshot_job']:
+        python_args['skip-snapshot-job'] = True
+    if kwargs['skip_restart_job']:
+        python_args['skip-restart-job'] = True
+
+    # Add cleanup flag
     if kwargs['cleanup']:
         python_args['cleanup'] = True
-    if kwargs['yes']:
-        python_args['yes'] = True
-    if kwargs['save_results']:
-        python_args['save-results'] = True
 
-    # Add optional args
-    if kwargs.get('storage_version'):
-        python_args['storage-version'] = kwargs['storage_version']
-    
     # Add log-file (prefer subcommand option, then global context, then auto-generate)
     if kwargs.get('log_file'):
         python_args['log-file'] = kwargs['log_file']
@@ -115,13 +168,13 @@ def capacity_benchmark(ctx, **kwargs):
         python_args['log-file'] = ctx.obj.log_file
     else:
         python_args['log-file'] = generate_log_filename('capacity-benchmark')
-    
+
     # Build and run command
     cmd = build_python_command(script_path, python_args)
-    
+
     console.print(f"[dim]Running: {' '.join(cmd[:2])} ...[/dim]")
     console.print()
-    
+
     try:
         result = subprocess.run(cmd, cwd=repo_root)
         sys.exit(result.returncode)

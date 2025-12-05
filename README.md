@@ -1438,6 +1438,7 @@ kubectl get storageclass
 | `--round-robin` | Migrate VMs in round-robin fashion across all nodes | false |
 | `--concurrency` | Number of concurrent migrations | 10 |
 | `--migration-timeout` | Timeout for each migration in seconds | 600 |
+| `--max-migration-retries` | Maximum retries for failed migrations | 3 |
 | `--vm-startup-timeout` | Timeout waiting for VMs to reach Running state | 3600 (1 hour) |
 | `--ssh-pod` | SSH test pod name for ping tests | ssh-test-pod |
 | `--ssh-pod-ns` | SSH test pod namespace | default |
@@ -1492,8 +1493,8 @@ kubectl get storageclass
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--vm-yaml` | `../examples/vm-templates/vm-template.yaml` | Path to VM YAML template |
-| `--vm-name` | `capacity-vm` | Base VM name |
+| `--vm-yaml` | `examples/vm-templates/vm-template.yaml` | Path to VM YAML template |
+| `--vm-name` | `rhel-9-vm` | Base VM name |
 | `--datasource-name` | `rhel9` | DataSource name |
 | `--datasource-namespace` | `openshift-virtualization-os-images` | DataSource namespace |
 | `--vm-memory` | `2048M` | VM memory |

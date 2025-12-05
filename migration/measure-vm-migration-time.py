@@ -125,6 +125,8 @@ Examples:
                        help='Timeout for each migration in seconds (default: 600)')
     parser.add_argument('--vm-startup-timeout', type=int, default=3600,
                        help='Timeout waiting for VMs to reach Running state in seconds (default: 3600 = 1 hour)')
+    parser.add_argument('--max-migration-retries', type=int, default=3,
+                       help='Maximum retries for failed migrations (default: 3)')
     
     # Validation options
     parser.add_argument('--ssh-pod', type=str, default='ssh-test-pod',
@@ -416,13 +418,15 @@ def migrate_vm_sequential(
     migration_timeout: int,
     logger,
     poll_interval: int = 2,
-    max_retries: int = 10,
+    max_vmim_retries: int = 10,
+    max_migration_retries: int = 3,
     retry_delay: int = 2
 ) -> Tuple[str, bool, float, Optional[str], Optional[str], Optional[float]]:
     """
     Migrate a single VM and measure time.
 
-    Retries VMIM creation up to `max_retries` times if webhook/internal errors occur.
+    Retries VMIM creation up to `max_vmim_retries` times if webhook/internal errors occur.
+    Retries the entire migration up to `max_migration_retries` times if migration fails.
     """
 
     try:
@@ -434,32 +438,64 @@ def migrate_vm_sequential(
 
         logger.info(f"[{ns}] Starting migration from {source_node}")
 
-        # --- Retry VMIM creation only ---
-        for attempt in range(1, max_retries + 1):
-            try:
-                if migrate_vm(vm_name, ns, target_node, logger):
-                    break
-                else:
-                    logger.warning(f"[{ns}] Failed to trigger migration (attempt {attempt}/{max_retries})")
-            except Exception as e:
-                err_str = str(e)
-                logger.warning(f"[{ns}] Exception creating VMIM (attempt {attempt}/{max_retries}): {err_str}")
+        # Retry the entire migration process if it fails
+        for migration_attempt in range(1, max_migration_retries + 1):
+            vmim_name = f"migration-{vm_name}"
 
-            # backoff before next retry
-            if attempt < max_retries:
-                logger.info(f"[{ns}] Retrying VMIM creation in {retry_delay}s...")
+            # --- Retry VMIM creation only ---
+            vmim_created = False
+            for attempt in range(1, max_vmim_retries + 1):
+                try:
+                    if migrate_vm(vm_name, ns, target_node, logger):
+                        vmim_created = True
+                        break
+                    else:
+                        logger.warning(f"[{ns}] Failed to trigger migration (attempt {attempt}/{max_vmim_retries})")
+                except Exception as e:
+                    err_str = str(e)
+                    logger.warning(f"[{ns}] Exception creating VMIM (attempt {attempt}/{max_vmim_retries}): {err_str}")
+
+                # backoff before next retry
+                if attempt < max_vmim_retries:
+                    logger.info(f"[{ns}] Retrying VMIM creation in {retry_delay}s...")
+                    time.sleep(retry_delay)
+
+            if not vmim_created:
+                logger.error(f"[{ns}] Failed to create VMIM after {max_vmim_retries} attempts")
+                return ns, False, 0.0, source_node, None, None
+
+            # Wait for migration to complete
+            success, observed_duration, actual_target, vmim_duration = wait_for_migration_complete(
+                vm_name, ns, migration_timeout, poll_interval, logger
+            )
+
+            if success:
+                return ns, success, observed_duration, source_node, actual_target, vmim_duration
+
+            # Migration failed - check if we should retry
+            if migration_attempt < max_migration_retries:
+                logger.warning(f"[{ns}] Migration failed (attempt {migration_attempt}/{max_migration_retries})")
+
+                # Delete the failed VMIM before retrying
+                logger.info(f"[{ns}] Deleting failed VMIM '{vmim_name}' before retry...")
+                delete_vmim(vmim_name, ns, logger)
+
+                # Wait a bit for cleanup
                 time.sleep(retry_delay)
-        else:
-            # ran out of retries
-            logger.error(f"[{ns}] Failed to create VMIM after {max_retries} attempts")
-            return ns, False, 0.0, source_node, None, None
 
-        # Wait for migration to complete
-        success, observed_duration, actual_target, vmim_duration = wait_for_migration_complete(
-            vm_name, ns, migration_timeout, poll_interval, logger
-        )
+                # Update source node in case VM moved partially
+                new_source = get_vm_node(vm_name, ns, logger)
+                if new_source and new_source != source_node:
+                    logger.info(f"[{ns}] VM is now on {new_source} (was {source_node})")
+                    source_node = new_source
 
-        return ns, success, observed_duration, source_node, actual_target, vmim_duration
+                logger.info(f"[{ns}] Retrying migration (attempt {migration_attempt + 1}/{max_migration_retries})...")
+            else:
+                logger.error(f"[{ns}] Migration failed after {max_migration_retries} attempts")
+                return ns, False, observed_duration, source_node, None, None
+
+        # Should not reach here, but just in case
+        return ns, False, 0.0, source_node, None, None
 
     except Exception as e:
         logger.error(f"[{ns}] Exception during migration: {e}")
@@ -701,7 +737,11 @@ def main():
         logger.info(f"\nSequential migration from {args.source_node or 'auto-selected node'} to {args.target_node or 'auto-selected node'}")
 
         for ns in namespaces:
-            result = migrate_vm_sequential(ns, args.vm_name, args.target_node, args.migration_timeout, logger, args.poll_interval)
+            result = migrate_vm_sequential(
+                ns, args.vm_name, args.target_node, args.migration_timeout, logger,
+                poll_interval=args.poll_interval,
+                max_migration_retries=args.max_migration_retries
+            )
             migration_results.append(result)
 
             # Small delay between migrations
@@ -747,7 +787,9 @@ def main():
                     args.target_node,
                     args.migration_timeout,
                     logger,
-                    args.poll_interval
+                    args.poll_interval,
+                    10,  # max_vmim_retries
+                    args.max_migration_retries
                 ): ns for ns in reordered_namespaces
             }
 
@@ -813,8 +855,11 @@ def main():
 
         with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
             futures = {
-                executor.submit(migrate_vm_sequential, ns, args.vm_name, None,
-                              args.migration_timeout, logger, args.poll_interval): ns
+                executor.submit(
+                    migrate_vm_sequential, ns, args.vm_name, None,
+                    args.migration_timeout, logger, args.poll_interval,
+                    10, args.max_migration_retries
+                ): ns
                 for ns in vms_to_evacuate  # Only migrate VMs on source node
             }
 
@@ -856,8 +901,11 @@ def main():
                 else:
                     target = None
 
-                future = executor.submit(migrate_vm_sequential, ns, args.vm_name, target,
-                                       args.migration_timeout, logger, args.poll_interval)
+                future = executor.submit(
+                    migrate_vm_sequential, ns, args.vm_name, target,
+                    args.migration_timeout, logger, args.poll_interval,
+                    10, args.max_migration_retries
+                )
                 futures[future] = ns
 
             for future in as_completed(futures):

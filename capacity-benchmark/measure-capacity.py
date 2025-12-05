@@ -39,8 +39,8 @@ from utils.common import (
 
 # Default configuration
 DEFAULT_NAMESPACE = 'virt-capacity-benchmark'
-DEFAULT_VM_YAML = '../examples/vm-templates/rhel9-vm-datasource.yaml'
-DEFAULT_VM_NAME = 'capacity-vm'
+DEFAULT_VM_YAML = '../examples/vm-templates/vm-template.yaml'
+DEFAULT_VM_NAME = 'rhel-9-vm'
 DEFAULT_VMS_PER_ITERATION = 5
 DEFAULT_DATA_VOLUME_COUNT = 9
 DEFAULT_MIN_VOL_SIZE = '30Gi'
@@ -217,7 +217,7 @@ def create_vm_with_data_volumes(vm_name: str, namespace: str, vm_yaml: str, stor
         with open(vm_yaml, 'r') as f:
             vm_content = f.read()
 
-        # Replace template variables
+        # Replace template variables (for templates with placeholders)
         vm_content = vm_content.replace('{{VM_NAME}}', vm_name)
         vm_content = vm_content.replace('{{STORAGE_CLASS_NAME}}', storage_class)
         vm_content = vm_content.replace('{{DATASOURCE_NAME}}', args.datasource_name)
@@ -225,6 +225,16 @@ def create_vm_with_data_volumes(vm_name: str, namespace: str, vm_yaml: str, stor
         vm_content = vm_content.replace('{{STORAGE_SIZE}}', vol_size)
         vm_content = vm_content.replace('{{VM_MEMORY}}', args.vm_memory)
         vm_content = vm_content.replace('{{VM_CPU_CORES}}', str(args.vm_cpu_cores))
+
+        # Also handle templates with hardcoded names (like rhel9-vm-datasource.yaml)
+        # Replace the base VM name from args with the unique vm_name
+        base_vm_name = args.vm_name  # e.g., 'rhel-9-vm'
+        if base_vm_name and base_vm_name != vm_name:
+            # Replace hardcoded VM name references with the unique name
+            # This handles: name: rhel-9-vm -> name: rhel-9-vm-1-1
+            # And: name: rhel-9-vm-volume -> name: rhel-9-vm-1-1-volume
+            vm_content = vm_content.replace(f'{base_vm_name}-volume', f'{vm_name}-volume')
+            vm_content = vm_content.replace(f'name: {base_vm_name}', f'name: {vm_name}')
 
         # TODO: Add data volumes to the template
         # For now, create VM with root volume only
