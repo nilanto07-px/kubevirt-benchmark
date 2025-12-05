@@ -160,10 +160,9 @@ kubectl get storageclass
 
 # 4.2 Note the name of your storage class
 # Examples: standard, gp2, ceph-rbd, vsphere-csi, ocs-storagecluster-ceph-rbd
-
-# 4.3 Verify the storage class is working
-kubectl get pvc -A | head -5
 ```
+
+> **Note:** Ensure your storage class is properly configured and working before running tests. The storage class should support dynamic provisioning and be compatible with KubeVirt DataVolumes.
 
 #### Step 5: Create SSH Pod for Network Tests
 
@@ -871,6 +870,53 @@ python3 measure-capacity.py --cleanup-only
 Tests VM recovery time after simulated node failures using Fence Agents Remediation (FAR).
 
 **Use Case**: Validates high availability and disaster recovery capabilities.
+
+#### Prerequisites for FAR Testing
+
+> **⚠️ Important:** Before running failure and recovery tests, you must have the following operators installed and configured on your cluster:
+
+**1. Node Health Check Operator (NHC)**
+
+The Node Health Check Operator monitors node health and automatically creates remediation CRs when nodes become unhealthy. NHC is responsible for:
+- Detecting unhealthy nodes based on configurable conditions
+- Creating FenceAgentsRemediation CRs to trigger remediation
+- Deleting remediation CRs after nodes recover
+
+**2. Fence Agents Remediation Operator (FAR)**
+
+The Fence Agents Remediation Operator performs the actual node fencing using fence agents (e.g., IPMI, AWS, etc.). FAR is responsible for:
+- Tainting unhealthy nodes to prevent workload scheduling
+- Executing fence agent commands to reboot or power off nodes
+- Evicting workloads from unhealthy nodes
+
+Both operators are part of the [MedIK8s](https://www.medik8s.io/) project for Kubernetes node remediation.
+
+**Installation & Configuration:**
+
+1. Install both operators via OperatorHub (OpenShift) or follow the MedIK8s installation guides
+2. Create a `FenceAgentsRemediationTemplate` CR with your fence agent configuration (IPMI, AWS, etc.)
+3. Create a `NodeHealthCheck` CR that references your FAR template
+4. Configure fence agent credentials (BMC/IPMI credentials, cloud provider credentials, etc.)
+
+> **📚 Documentation:** Configuration is environment-specific and depends on your fencing method (IPMI, AWS, etc.). Please refer to the official MedIK8s documentation for detailed setup instructions:
+> - [Node Health Check Operator](https://www.medik8s.io/remediation/node-healthcheck-operator/node-healthcheck-operator/)
+> - [Fence Agents Remediation](https://www.medik8s.io/remediation/fence-agents-remediation/fence-agents-remediation/)
+
+**Verify Installation:**
+
+```bash
+# Verify CRDs are available
+kubectl get crd nodehealthchecks.remediation.medik8s.io
+kubectl get crd fenceagentsremediations.fence-agents-remediation.medik8s.io
+
+# Verify your FenceAgentsRemediationTemplate exists
+kubectl get fenceagentsremediationtemplates -A
+
+# Verify your NodeHealthCheck is configured
+kubectl get nodehealthchecks -A
+```
+
+#### Running FAR Tests
 
 **virtbench CLI:**
 ```bash
