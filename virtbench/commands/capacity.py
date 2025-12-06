@@ -36,6 +36,8 @@ console = Console()
 @click.option('--skip-restart-job', is_flag=True, help='Skip restart job')
 @click.option('--concurrency', '-c', default=10, type=int, help='Max parallel threads')
 @click.option('--poll-interval', default=5, type=int, help='Seconds between status checks')
+@click.option('--scheduling-timeout', default=120, type=int,
+              help='Seconds to wait in Scheduling state before declaring capacity reached (default: 120)')
 @click.option('--cleanup/--no-cleanup', default=False, help='Delete test resources after completion')
 @click.option('--cleanup-only', is_flag=True, help='Only cleanup resources from previous runs')
 @click.option('--log-file', type=click.Path(), help='Log file path (auto-generated if not specified)')
@@ -144,6 +146,7 @@ def capacity_benchmark(ctx, **kwargs):
         'vm-cpu-cores': kwargs['vm_cpu_cores'],
         'concurrency': kwargs['concurrency'],
         'poll-interval': kwargs['poll_interval'],
+        'scheduling-timeout': kwargs['scheduling_timeout'],
         'log-level': kwargs['log_level'],
     }
 

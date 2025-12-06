@@ -1515,6 +1515,7 @@ kubectl get storageclass
 |--------|---------|-------------|
 | `--concurrency` | `10` | Number of concurrent operations |
 | `--poll-interval` | `5` | Polling interval in seconds |
+| `--scheduling-timeout` | `120` | Seconds to wait in Scheduling state before declaring capacity reached |
 
 #### Cleanup Options
 

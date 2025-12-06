@@ -120,6 +120,8 @@ Examples:
                         help=f'Number of concurrent operations (default: {DEFAULT_CONCURRENCY})')
     parser.add_argument('--poll-interval', type=int, default=DEFAULT_POLL_INTERVAL,
                         help=f'Polling interval in seconds (default: {DEFAULT_POLL_INTERVAL})')
+    parser.add_argument('--scheduling-timeout', type=int, default=120,
+                        help='Seconds to wait in Scheduling state before declaring capacity reached (default: 120)')
 
     # Cleanup options
     parser.add_argument('--cleanup', action='store_true',
@@ -217,24 +219,39 @@ def create_vm_with_data_volumes(vm_name: str, namespace: str, vm_yaml: str, stor
         with open(vm_yaml, 'r') as f:
             vm_content = f.read()
 
-        # Replace template variables (for templates with placeholders)
-        vm_content = vm_content.replace('{{VM_NAME}}', vm_name)
-        vm_content = vm_content.replace('{{STORAGE_CLASS_NAME}}', storage_class)
-        vm_content = vm_content.replace('{{DATASOURCE_NAME}}', args.datasource_name)
-        vm_content = vm_content.replace('{{DATASOURCE_NAMESPACE}}', args.datasource_namespace)
-        vm_content = vm_content.replace('{{STORAGE_SIZE}}', vol_size)
-        vm_content = vm_content.replace('{{VM_MEMORY}}', args.vm_memory)
-        vm_content = vm_content.replace('{{VM_CPU_CORES}}', str(args.vm_cpu_cores))
+        # Check if template uses placeholders or hardcoded names
+        has_placeholders = '{{VM_NAME}}' in vm_content
 
-        # Also handle templates with hardcoded names (like rhel9-vm-datasource.yaml)
-        # Replace the base VM name from args with the unique vm_name
-        base_vm_name = args.vm_name  # e.g., 'rhel-9-vm'
-        if base_vm_name and base_vm_name != vm_name:
-            # Replace hardcoded VM name references with the unique name
-            # This handles: name: rhel-9-vm -> name: rhel-9-vm-1-1
-            # And: name: rhel-9-vm-volume -> name: rhel-9-vm-1-1-volume
-            vm_content = vm_content.replace(f'{base_vm_name}-volume', f'{vm_name}-volume')
-            vm_content = vm_content.replace(f'name: {base_vm_name}', f'name: {vm_name}')
+        if has_placeholders:
+            # Replace template variables (for templates with placeholders like vm-template.yaml)
+            vm_content = vm_content.replace('{{VM_NAME}}', vm_name)
+            vm_content = vm_content.replace('{{STORAGE_CLASS_NAME}}', storage_class)
+            vm_content = vm_content.replace('{{DATASOURCE_NAME}}', args.datasource_name)
+            vm_content = vm_content.replace('{{DATASOURCE_NAMESPACE}}', args.datasource_namespace)
+            vm_content = vm_content.replace('{{STORAGE_SIZE}}', vol_size)
+            vm_content = vm_content.replace('{{VM_MEMORY}}', args.vm_memory)
+            vm_content = vm_content.replace('{{VM_CPU_CORES}}', str(args.vm_cpu_cores))
+        else:
+            # Handle templates with hardcoded names (like rhel9-vm-datasource.yaml)
+            # Replace the base VM name from args with the unique vm_name
+            base_vm_name = args.vm_name  # e.g., 'rhel-9-vm'
+            if base_vm_name and base_vm_name != vm_name:
+                # Replace hardcoded VM name references with the unique name
+                # Order matters: replace longer patterns first to avoid partial matches
+                # This handles: name: rhel-9-vm-volume -> name: rhel-9-vm-1-1-volume
+                # And: name: rhel-9-vm -> name: rhel-9-vm-1-1
+                vm_content = vm_content.replace(f'{base_vm_name}-volume', f'{vm_name}-volume')
+                # Use regex to replace exact VM name (with word boundary via newline/space)
+                import re
+                # Replace "name: rhel-9-vm" but not "name: rhel-9-vm-volume" (already handled above)
+                vm_content = re.sub(
+                    rf'(name:\s*){re.escape(base_vm_name)}(\s*$|\s*\n)',
+                    rf'\g<1>{vm_name}\2',
+                    vm_content,
+                    flags=re.MULTILINE
+                )
+            # Also replace storage class placeholder if present
+            vm_content = vm_content.replace('{{STORAGE_CLASS_NAME}}', storage_class)
 
         # TODO: Add data volumes to the template
         # For now, create VM with root volume only
@@ -262,7 +279,8 @@ def create_vm_with_data_volumes(vm_name: str, namespace: str, vm_yaml: str, stor
         return False
 
 
-def wait_for_vm_running(vm_name: str, namespace: str, logger, timeout: int = 1800) -> bool:
+def wait_for_vm_running(vm_name: str, namespace: str, logger, timeout: int = 1800,
+                        scheduling_timeout: int = 120) -> Tuple[bool, str]:
     """
     Wait for a VM to reach Running state.
 
@@ -270,12 +288,18 @@ def wait_for_vm_running(vm_name: str, namespace: str, logger, timeout: int = 180
         vm_name: VM name
         namespace: Namespace
         logger: Logger instance
-        timeout: Timeout in seconds
+        timeout: Total timeout in seconds
+        scheduling_timeout: Max time to wait in Scheduling state before failing (capacity reached)
 
     Returns:
-        True if VM reached Running state, False otherwise
+        Tuple of (success, failure_reason)
+        - (True, '') if VM reached Running state
+        - (False, 'scheduling') if VM stuck in Scheduling (capacity reached)
+        - (False, 'timeout') if general timeout
+        - (False, 'error') if VM in error state
     """
     start_time = time.time()
+    scheduling_start = None
 
     while time.time() - start_time < timeout:
         status = get_vm_status(vm_name, namespace, logger)
@@ -283,15 +307,36 @@ def wait_for_vm_running(vm_name: str, namespace: str, logger, timeout: int = 180
         if status == 'Running':
             elapsed = time.time() - start_time
             logger.info(f"VM {vm_name} reached Running state after {elapsed:.2f}s")
-            return True
+            return True, ''
+
+        # Track time spent in Scheduling state
+        if status == 'Scheduling':
+            if scheduling_start is None:
+                scheduling_start = time.time()
+            elif time.time() - scheduling_start > scheduling_timeout:
+                logger.warning(f"VM {vm_name} stuck in Scheduling state for {scheduling_timeout}s - cluster capacity likely reached")
+                return False, 'scheduling'
+        else:
+            # Reset scheduling timer if status changes
+            scheduling_start = None
+
+        # Check for error states
+        if status == 'ErrorUnschedulable':
+            # ErrorUnschedulable means cluster capacity reached - this is expected in capacity testing
+            logger.warning(f"VM {vm_name} in ErrorUnschedulable state - cluster capacity reached")
+            return False, 'capacity'
+        elif status in ('CrashLoopBackOff', 'ErrImagePull', 'Error'):
+            logger.error(f"VM {vm_name} in error state: {status}")
+            return False, 'error'
 
         time.sleep(5)
 
-    logger.error(f"Timeout waiting for VM {vm_name} to reach Running state")
-    return False
+    logger.error(f"Timeout waiting for VM {vm_name} to reach Running state (last status: {status})")
+    return False, 'timeout'
 
 
-def wait_for_vms_running(vm_names: List[str], namespace: str, logger, timeout: int = 1800) -> Tuple[List[str], List[str]]:
+def wait_for_vms_running(vm_names: List[str], namespace: str, logger, timeout: int = 1800,
+                         scheduling_timeout: int = 120) -> Tuple[List[str], List[str], str]:
     """
     Wait for multiple VMs to reach Running state.
 
@@ -299,28 +344,43 @@ def wait_for_vms_running(vm_names: List[str], namespace: str, logger, timeout: i
         vm_names: List of VM names
         namespace: Namespace
         logger: Logger instance
-        timeout: Timeout in seconds
+        timeout: Total timeout in seconds
+        scheduling_timeout: Max time to wait in Scheduling state
 
     Returns:
-        Tuple of (successful_vms, failed_vms)
+        Tuple of (successful_vms, failed_vms, failure_reason)
+        failure_reason is 'scheduling' if capacity reached, 'timeout' or 'error' otherwise
     """
     successful = []
     failed = []
+    failure_reason = ''
 
     for vm_name in vm_names:
         try:
-            if wait_for_vm_running(vm_name, namespace, logger, timeout):
+            success, reason = wait_for_vm_running(vm_name, namespace, logger, timeout, scheduling_timeout)
+            if success:
                 successful.append(vm_name)
             else:
                 failed.append(vm_name)
+                failure_reason = reason
+                # If capacity reached (scheduling or ErrorUnschedulable), don't wait for remaining VMs
+                if reason in ('scheduling', 'capacity'):
+                    remaining_count = len(vm_names) - len(successful) - len(failed)
+                    if remaining_count > 0:
+                        logger.warning(f"Capacity reached - skipping wait for remaining {remaining_count} VMs")
+                        # Add remaining VMs to failed list
+                        remaining_idx = vm_names.index(vm_name) + 1
+                        failed.extend(vm_names[remaining_idx:])
+                    break
         except Exception as e:
             logger.error(f"Error waiting for VM {vm_name}: {e}")
             failed.append(vm_name)
+            failure_reason = 'error'
 
-    return successful, failed
+    return successful, failed, failure_reason
 
 
-def run_iteration(iteration: int, namespace: str, storage_class: str, args, logger) -> bool:
+def run_iteration(iteration: int, namespace: str, storage_class: str, args, logger) -> Tuple[bool, bool, int]:
     """
     Run a single capacity test iteration.
 
@@ -332,7 +392,10 @@ def run_iteration(iteration: int, namespace: str, storage_class: str, args, logg
         logger: Logger instance
 
     Returns:
-        True if iteration successful, False on failure
+        Tuple of (success, capacity_reached, vms_created)
+        - success: True if iteration completed successfully
+        - capacity_reached: True if cluster capacity was reached (VMs stuck in Scheduling)
+        - vms_created: Number of VMs that reached Running state
     """
     logger.info("=" * 100)
     logger.info(f"{Colors.BOLD}ITERATION {iteration}{Colors.ENDC}")
@@ -355,15 +418,23 @@ def run_iteration(iteration: int, namespace: str, storage_class: str, args, logg
             created_vms.append(vm_name)
         else:
             logger.error(f"Failed to create VM {vm_name}")
-            return False
+            return False, False, 0
 
     # Wait for VMs to be running
-    logger.info(f"Waiting for {len(created_vms)} VMs to reach Running state...")
-    successful_vms, failed_vms = wait_for_vms_running(created_vms, namespace, logger)
+    scheduling_timeout = getattr(args, 'scheduling_timeout', 120)
+    logger.info(f"Waiting for {len(created_vms)} VMs to reach Running state (scheduling timeout: {scheduling_timeout}s)...")
+    successful_vms, failed_vms, failure_reason = wait_for_vms_running(
+        created_vms, namespace, logger, scheduling_timeout=scheduling_timeout
+    )
 
     if failed_vms:
-        logger.error(f"Phase 1 FAILED: {len(failed_vms)} VMs failed to start")
-        return False
+        if failure_reason in ('scheduling', 'capacity'):
+            logger.warning(f"{Colors.WARNING}CAPACITY REACHED: {len(failed_vms)} VMs could not be scheduled{Colors.ENDC}")
+            logger.info(f"Successfully started {len(successful_vms)} VMs before capacity was reached")
+            return False, True, len(successful_vms)
+        else:
+            logger.error(f"Phase 1 FAILED: {len(failed_vms)} VMs failed to start (reason: {failure_reason})")
+            return False, False, len(successful_vms)
 
     phase_duration = time.time() - phase_start
     logger.info(f"{Colors.OKGREEN}Phase 1 COMPLETE: {len(successful_vms)} VMs running (took {phase_duration:.2f}s){Colors.ENDC}")
@@ -403,7 +474,7 @@ def run_iteration(iteration: int, namespace: str, storage_class: str, args, logg
 
         if resize_failed:
             logger.error("Phase 2 FAILED: Volume resize failed")
-            return False
+            return False, False, len(successful_vms)
 
         phase_duration = time.time() - phase_start
         logger.info(f"{Colors.OKGREEN}Phase 2 COMPLETE: All volumes resized (took {phase_duration:.2f}s){Colors.ENDC}")
@@ -424,15 +495,15 @@ def run_iteration(iteration: int, namespace: str, storage_class: str, args, logg
 
         if restart_failed:
             logger.error("Phase 3 FAILED: VM restart failed")
-            return False
+            return False, False, len(successful_vms)
 
         # Wait for VMs to be running again
         logger.info("Waiting for VMs to be running after restart...")
-        successful_vms, failed_vms = wait_for_vms_running(successful_vms, namespace, logger)
+        successful_vms, failed_vms, failure_reason = wait_for_vms_running(successful_vms, namespace, logger)
 
         if failed_vms:
             logger.error(f"Phase 3 FAILED: {len(failed_vms)} VMs failed to restart")
-            return False
+            return False, False, len(successful_vms)
 
         phase_duration = time.time() - phase_start
         logger.info(f"{Colors.OKGREEN}Phase 3 COMPLETE: All VMs restarted (took {phase_duration:.2f}s){Colors.ENDC}")
@@ -464,7 +535,7 @@ def run_iteration(iteration: int, namespace: str, storage_class: str, args, logg
 
         if snapshot_failed:
             logger.error("Phase 4 FAILED: Snapshot creation failed")
-            return False
+            return False, False, len(successful_vms)
 
         phase_duration = time.time() - phase_start
         logger.info(f"{Colors.OKGREEN}Phase 4 COMPLETE: {len(snapshots_created)} snapshots created (took {phase_duration:.2f}s){Colors.ENDC}")
@@ -492,7 +563,7 @@ def run_iteration(iteration: int, namespace: str, storage_class: str, args, logg
 
         if migration_failed:
             logger.error("Phase 5 FAILED: Migration failed")
-            return False
+            return False, False, len(successful_vms)
 
         phase_duration = time.time() - phase_start
         logger.info(f"{Colors.OKGREEN}Phase 5 COMPLETE: All VMs migrated (took {phase_duration:.2f}s){Colors.ENDC}")
@@ -500,7 +571,7 @@ def run_iteration(iteration: int, namespace: str, storage_class: str, args, logg
         logger.info(f"\n{Colors.WARNING}Phase 5: SKIPPED (--skip-migration-job){Colors.ENDC}")
 
     logger.info(f"\n{Colors.OKGREEN}{Colors.BOLD}ITERATION {iteration} COMPLETE{Colors.ENDC}")
-    return True
+    return True, False, len(successful_vms)
 
 
 
@@ -542,21 +613,74 @@ def cleanup_namespace(namespace: str, logger) -> bool:
         return False
 
 
-def print_test_summary(iteration: int, total_vms: int, logger):
+def print_test_summary(results: dict, logger):
     """
-    Print test summary.
+    Print comprehensive test summary report.
 
     Args:
-        iteration: Number of iterations completed
-        total_vms: Total VMs created
+        results: Dictionary containing test results
         logger: Logger instance
     """
     logger.info("\n" + "=" * 100)
-    logger.info(f"{Colors.BOLD}CAPACITY TEST SUMMARY{Colors.ENDC}")
+    logger.info(f"{Colors.BOLD}CAPACITY BENCHMARK REPORT{Colors.ENDC}")
     logger.info("=" * 100)
-    logger.info(f"Iterations completed:  {iteration}")
-    logger.info(f"Total VMs created:     {total_vms}")
-    logger.info("=" * 100)
+
+    # Test Configuration
+    logger.info(f"\n{Colors.HEADER}Test Configuration:{Colors.ENDC}")
+    logger.info(f"  Storage Class(es):     {results.get('storage_classes', 'N/A')}")
+    logger.info(f"  VMs per iteration:     {results.get('vms_per_iteration', 'N/A')}")
+    logger.info(f"  Data volumes per VM:   {results.get('data_volumes_per_vm', 'N/A')}")
+    logger.info(f"  Volume size:           {results.get('volume_size', 'N/A')}")
+    logger.info(f"  VM Memory:             {results.get('vm_memory', 'N/A')}")
+    logger.info(f"  VM CPU Cores:          {results.get('vm_cpu_cores', 'N/A')}")
+
+    # Test Results
+    logger.info(f"\n{Colors.HEADER}Test Results:{Colors.ENDC}")
+    logger.info(f"  Iterations completed:  {results.get('iterations_completed', 0)}")
+    logger.info(f"  Total VMs created:     {results.get('total_vms', 0)}")
+    logger.info(f"  Total PVCs created:    {results.get('total_pvcs', 0)}")
+    logger.info(f"  Test duration:         {results.get('duration_str', 'N/A')}")
+
+    # Capacity Status
+    capacity_reached = results.get('capacity_reached', False)
+    if capacity_reached:
+        logger.info(f"\n{Colors.OKGREEN}✓ CAPACITY LIMIT REACHED{Colors.ENDC}")
+        logger.info(f"  The cluster reached its capacity limit.")
+        logger.info(f"  Maximum VMs that could be scheduled: {results.get('total_vms', 0)}")
+    else:
+        end_reason = results.get('end_reason', 'unknown')
+        if end_reason == 'max_iterations':
+            logger.info(f"\n{Colors.WARNING}⚠ MAX ITERATIONS REACHED{Colors.ENDC}")
+            logger.info(f"  Test stopped after reaching max iterations limit.")
+            logger.info(f"  Cluster may have more capacity available.")
+        elif end_reason == 'interrupted':
+            logger.info(f"\n{Colors.WARNING}⚠ TEST INTERRUPTED{Colors.ENDC}")
+            logger.info(f"  Test was interrupted by user.")
+        elif end_reason == 'error':
+            logger.info(f"\n{Colors.FAIL}✗ TEST FAILED{Colors.ENDC}")
+            logger.info(f"  Test encountered an error.")
+        else:
+            logger.info(f"\n{Colors.WARNING}⚠ TEST ENDED{Colors.ENDC}")
+
+    # Phases executed
+    phases_skipped = results.get('phases_skipped', [])
+    phases_run = ['Create VMs']
+    if 'resize' not in phases_skipped:
+        phases_run.append('Resize Volumes')
+    if 'restart' not in phases_skipped:
+        phases_run.append('Restart VMs')
+    if 'snapshot' not in phases_skipped:
+        phases_run.append('Create Snapshots')
+    if 'migration' not in phases_skipped:
+        phases_run.append('Migrate VMs')
+
+    logger.info(f"\n{Colors.HEADER}Phases Executed:{Colors.ENDC}")
+    for phase in phases_run:
+        logger.info(f"  ✓ {phase}")
+    for phase in phases_skipped:
+        logger.info(f"  - {phase.capitalize()} (skipped)")
+
+    logger.info("\n" + "=" * 100)
 
 
 def main():
@@ -599,12 +723,15 @@ def main():
     iteration = 1
     total_vms = 0
     test_start_time = time.time()
+    capacity_reached = False
+    end_reason = 'unknown'
 
     try:
         while True:
             # Check if we've reached max iterations
             if args.max_iterations > 0 and iteration > args.max_iterations:
                 logger.info(f"\n{Colors.OKGREEN}Reached maximum iterations ({args.max_iterations}){Colors.ENDC}")
+                end_reason = 'max_iterations'
                 break
 
             # Select storage class (round-robin)
@@ -612,15 +739,25 @@ def main():
 
             # Run iteration
             iteration_start = time.time()
-            success = run_iteration(iteration, args.namespace, storage_class, args, logger)
+            success, iter_capacity_reached, vms_created = run_iteration(iteration, args.namespace, storage_class, args, logger)
             iteration_duration = time.time() - iteration_start
 
+            # Always count VMs that were successfully created
+            total_vms += vms_created
+
             if not success:
-                logger.error(f"\n{Colors.FAIL}ITERATION {iteration} FAILED after {iteration_duration:.2f}s{Colors.ENDC}")
-                logger.error("Capacity limit reached or error occurred")
+                if iter_capacity_reached:
+                    capacity_reached = True
+                    end_reason = 'capacity'
+                    logger.warning(f"\n{Colors.WARNING}ITERATION {iteration} - CAPACITY REACHED after {iteration_duration:.2f}s{Colors.ENDC}")
+                    logger.info(f"{Colors.OKGREEN}Cluster capacity limit reached!{Colors.ENDC}")
+                    logger.info(f"Successfully created {vms_created} VMs in this iteration before capacity was reached")
+                else:
+                    end_reason = 'error'
+                    logger.error(f"\n{Colors.FAIL}ITERATION {iteration} FAILED after {iteration_duration:.2f}s{Colors.ENDC}")
+                    logger.error("Error occurred during iteration")
                 break
 
-            total_vms += args.vms
             logger.info(f"Iteration {iteration} took {iteration_duration:.2f}s")
             logger.info(f"Total VMs created so far: {total_vms}")
 
@@ -631,15 +768,47 @@ def main():
 
     except KeyboardInterrupt:
         logger.warning(f"\n{Colors.WARNING}Test interrupted by user{Colors.ENDC}")
+        end_reason = 'interrupted'
     except Exception as e:
         logger.error(f"\n{Colors.FAIL}Unexpected error: {e}{Colors.ENDC}")
         import traceback
         logger.error(traceback.format_exc())
+        end_reason = 'error'
 
-    # Print summary
+    # Build results dictionary
     test_duration = time.time() - test_start_time
-    logger.info(f"\nTotal test duration: {test_duration:.2f}s ({test_duration/60:.2f} minutes)")
-    print_test_summary(iteration - 1, total_vms, logger)
+    duration_minutes = test_duration / 60
+    duration_str = f"{test_duration:.2f}s ({duration_minutes:.2f} minutes)"
+
+    # Determine which phases were skipped
+    phases_skipped = []
+    if args.skip_resize_job:
+        phases_skipped.append('resize')
+    if args.skip_restart_job:
+        phases_skipped.append('restart')
+    if args.skip_snapshot_job:
+        phases_skipped.append('snapshot')
+    if args.skip_migration_job:
+        phases_skipped.append('migration')
+
+    results = {
+        'storage_classes': ', '.join(storage_classes),
+        'vms_per_iteration': args.vms,
+        'data_volumes_per_vm': args.data_volume_count,
+        'volume_size': args.min_vol_size,
+        'vm_memory': args.vm_memory,
+        'vm_cpu_cores': args.vm_cpu_cores,
+        'iterations_completed': iteration - 1 if end_reason != 'capacity' else iteration,
+        'total_vms': total_vms,
+        'total_pvcs': total_vms * args.data_volume_count,
+        'duration_str': duration_str,
+        'capacity_reached': capacity_reached,
+        'end_reason': end_reason,
+        'phases_skipped': phases_skipped,
+    }
+
+    # Print summary report
+    print_test_summary(results, logger)
 
     # Cleanup if requested
     if args.cleanup:
