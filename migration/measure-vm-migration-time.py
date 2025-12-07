@@ -11,17 +11,17 @@ This script measures VM live migration performance across different scenarios:
 Usage:
     # Sequential migration
     python3 measure-vm-migration-time.py --start 1 --end 10 --source-node worker-1 --target-node worker-2
-    
+
     # Parallel migration
     python3 measure-vm-migration-time.py --start 1 --end 50 --source-node worker-1 --target-node worker-2 --parallel --concurrency 10
-    
+
     # Evacuation scenario
     python3 measure-vm-migration-time.py --start 1 --end 100 --source-node worker-1 --evacuate
-    
+
     # Round-robin migration
     python3 measure-vm-migration-time.py --start 1 --end 100 --round-robin
 
-Author: Portworx
+Author: KubeVirt Benchmark Suite Contributors
 License: Apache 2.0
 """
 
@@ -47,7 +47,7 @@ from utils.common import (
     wait_for_migration_complete, get_available_nodes, create_namespace,
     find_busiest_node, get_vms_on_node, remove_node_selectors,
     cleanup_test_namespaces, confirm_cleanup, print_cleanup_summary,
-    list_resources_in_namespace, delete_vmim, save_migration_results, get_px_version_from_cluster
+    list_resources_in_namespace, delete_vmim, save_migration_results
 )
 
 # Default configuration
@@ -119,16 +119,22 @@ Examples:
     # Performance options
     parser.add_argument('-c', '--concurrency', type=int, default=10,
                        help='Number of concurrent migrations (default: 10)')
+    parser.add_argument('--poll-interval', type=int, default=5,
+                       help='Seconds between status checks (default: 5)')
     parser.add_argument('--migration-timeout', type=int, default=600,
                        help='Timeout for each migration in seconds (default: 600)')
+    parser.add_argument('--vm-startup-timeout', type=int, default=3600,
+                       help='Timeout waiting for VMs to reach Running state in seconds (default: 3600 = 1 hour)')
+    parser.add_argument('--max-migration-retries', type=int, default=3,
+                       help='Maximum retries for failed migrations (default: 3)')
     
     # Validation options
-    parser.add_argument('--ssh-pod', type=str, default='ssh-pod-name',
-                       help='SSH test pod name for ping tests (default: ssh-pod-name)')
+    parser.add_argument('--ssh-pod', type=str, default='ssh-test-pod',
+                       help='SSH test pod name for ping tests (default: ssh-test-pod)')
     parser.add_argument('--ssh-pod-ns', type=str, default='default',
                        help='SSH test pod namespace (default: default)')
-    parser.add_argument('--ping-timeout', type=int, default=600,
-                       help='Timeout for ping test in seconds (default: 600)')
+    parser.add_argument('--ping-timeout', type=int, default=3600,
+                       help='Timeout for ping validation in seconds (default: 3600 = 1 hour)')
     parser.add_argument('--skip-ping', action='store_true',
                        help='Skip ping validation after migration')
     
@@ -157,17 +163,10 @@ Examples:
     )
 
     parser.add_argument(
-        '--px-version',
+        '--storage-version',
         type=str,
         default=None,
-        help='Portworx version to include in results path (auto-detect if not provided)'
-    )
-
-    parser.add_argument(
-        '--px-namespace',
-        type=str,
-        default="portworx",
-        help='Namespace where Portworx is installed (default: portworx)'
+        help='Storage version to include in results path (optional)'
     )
 
     parser.add_argument(
@@ -230,73 +229,184 @@ def validate_migration_args(args, logger):
 
 
 def create_vms_on_node(namespaces: List[str], vm_yaml: str, node_name: str,
-                       vm_name: str, logger) -> Dict[str, bool]:
+                       vm_name: str, logger, max_retries: int = 5,
+                       initial_delay: float = 2.0) -> Dict[str, bool]:
     """
-    Create VMs on a specific node.
-    
+    Create VMs on a specific node with retry logic.
+
+    Args:
+        namespaces: List of namespaces to create VMs in
+        vm_yaml: Path to VM YAML template
+        node_name: Node to create VMs on (can be None for no node selector)
+        vm_name: VM resource name
+        logger: Logger instance
+        max_retries: Maximum number of retry attempts (default: 5)
+        initial_delay: Initial delay between retries in seconds (default: 2.0)
+                      Uses exponential backoff: delay * 2^attempt
+
     Returns:
         Dictionary mapping namespace to success status
     """
-    logger.info(f"\nCreating {len(namespaces)} VMs on node {node_name}...")
-    
-    # Import create_vm function from datasource-clone script
-    # For now, we'll use a simplified version
+    if node_name:
+        logger.info(f"\nCreating {len(namespaces)} VMs on node {node_name}...")
+    else:
+        logger.info(f"\nCreating {len(namespaces)} VMs (no node selector)...")
+
     from utils.common import add_node_selector_to_vm_yaml
     import subprocess
-    
+
     results = {}
-    
+
     for ns in namespaces:
-        try:
-            # Modify VM YAML to add nodeSelector
-            modified_yaml = add_node_selector_to_vm_yaml(vm_yaml, node_name, logger)
-            
-            if not modified_yaml:
-                logger.error(f"[{ns}] Failed to modify VM YAML")
-                results[ns] = False
-                continue
-            
-            # Create VM
-            result = subprocess.run(
-                f"kubectl create -f - -n {ns}",
-                shell=True, input=modified_yaml.encode(), capture_output=True
-            )
-            
-            if result.returncode == 0:
-                logger.info(f"[{ns}] VM created successfully")
-                results[ns] = True
-            else:
-                logger.error(f"[{ns}] Failed to create VM: {result.stderr.decode()}")
-                results[ns] = False
-        
-        except Exception as e:
-            logger.error(f"[{ns}] Exception creating VM: {e}")
-            results[ns] = False
-    
+        success = False
+        last_error = None
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Modify VM YAML to add nodeSelector if node_name is specified
+                if node_name:
+                    modified_yaml = add_node_selector_to_vm_yaml(vm_yaml, node_name, logger)
+                    if not modified_yaml:
+                        logger.error(f"[{ns}] Failed to modify VM YAML")
+                        last_error = "Failed to modify VM YAML"
+                        break  # Don't retry YAML modification failures
+                else:
+                    # Read the YAML file directly without node selector
+                    with open(vm_yaml, 'r') as f:
+                        modified_yaml = f.read()
+
+                # Create VM
+                result = subprocess.run(
+                    f"kubectl create -f - -n {ns}",
+                    shell=True, input=modified_yaml.encode(), capture_output=True
+                )
+
+                if result.returncode == 0:
+                    logger.info(f"[{ns}] VM created successfully")
+                    success = True
+                    break
+                else:
+                    error_msg = result.stderr.decode().strip()
+                    last_error = error_msg
+
+                    # Check if it's a retryable error (webhook timeout, internal error)
+                    retryable_errors = [
+                        'context deadline exceeded',
+                        'webhook',
+                        'Internal error',
+                        'InternalError',
+                        'connection refused',
+                        'timeout',
+                        'temporarily unavailable'
+                    ]
+
+                    is_retryable = any(err in error_msg for err in retryable_errors)
+
+                    if is_retryable and attempt < max_retries:
+                        delay = initial_delay * (2 ** (attempt - 1))  # Exponential backoff
+                        logger.warning(f"[{ns}] Retryable error (attempt {attempt}/{max_retries}): {error_msg}")
+                        logger.info(f"[{ns}] Retrying in {delay:.1f}s...")
+                        time.sleep(delay)
+                    elif is_retryable:
+                        logger.error(f"[{ns}] Failed after {max_retries} attempts: {error_msg}")
+                    else:
+                        # Non-retryable error, fail immediately
+                        logger.error(f"[{ns}] Failed to create VM: {error_msg}")
+                        break
+
+            except Exception as e:
+                last_error = str(e)
+                if attempt < max_retries:
+                    delay = initial_delay * (2 ** (attempt - 1))
+                    logger.warning(f"[{ns}] Exception (attempt {attempt}/{max_retries}): {e}")
+                    logger.info(f"[{ns}] Retrying in {delay:.1f}s...")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"[{ns}] Exception after {max_retries} attempts: {e}")
+
+        results[ns] = success
+        if not success and last_error:
+            logger.debug(f"[{ns}] Final error: {last_error}")
+
+    # Log summary
+    successful = sum(1 for v in results.values() if v)
+    failed = len(results) - successful
+    logger.info(f"\nVM creation complete: {successful} successful, {failed} failed")
+
     return results
 
 
-def wait_for_vms_running(namespaces: List[str], vm_name: str, timeout: int, logger) -> Dict[str, bool]:
-    """Wait for all VMs to reach Running state."""
-    logger.info(f"\nWaiting for {len(namespaces)} VMs to reach Running state...")
+def wait_for_vms_running(namespaces: List[str], vm_name: str, timeout: int, logger,
+                         poll_interval: int = 10) -> Dict[str, bool]:
+    """
+    Wait for all VMs to reach Running state with polling.
 
-    results = {}
+    Args:
+        namespaces: List of namespaces containing VMs
+        vm_name: VM resource name
+        timeout: Maximum time to wait in seconds (default should be 3600 = 1 hour)
+        logger: Logger instance
+        poll_interval: Seconds between status checks (default: 10)
+
+    Returns:
+        Dictionary mapping namespace to success status (True if Running)
+    """
+    logger.info(f"\nWaiting for {len(namespaces)} VMs to reach Running state (timeout: {timeout}s)...")
+
+    # Track which VMs are still pending
+    pending = set(namespaces)
+    results = {ns: False for ns in namespaces}
     start_time = time.time()
 
-    for ns in namespaces:
+    while pending and (time.time() - start_time) < timeout:
         elapsed = time.time() - start_time
-        remaining = max(0, timeout - elapsed)
 
-        if remaining <= 0:
-            logger.warning(f"[{ns}] Timeout waiting for VMs to reach Running state")
+        # Check status of all pending VMs
+        still_pending = set()
+        for ns in pending:
+            status = get_vm_status(vm_name, ns, logger)
+
+            if status == "Running":
+                logger.info(f"[{ns}] VM is now Running")
+                results[ns] = True
+            elif status in ["Provisioning", "Starting", "Stopped", "WaitingForVolumeBinding",
+                           "Scheduling", "Scheduled", "DataVolumeError", None]:
+                # VM is still starting up - keep waiting
+                still_pending.add(ns)
+            else:
+                # Unexpected status - could be an error
+                logger.warning(f"[{ns}] VM has unexpected status: {status}")
+                still_pending.add(ns)
+
+        pending = still_pending
+
+        if pending:
+            running_count = len(namespaces) - len(pending)
+            remaining_time = timeout - elapsed
+            logger.info(f"VMs running: {running_count}/{len(namespaces)} | "
+                       f"Pending: {len(pending)} | "
+                       f"Elapsed: {elapsed:.0f}s | "
+                       f"Remaining: {remaining_time:.0f}s")
+
+            # Log which VMs are still pending (only first few to avoid spam)
+            if len(pending) <= 5:
+                for ns in pending:
+                    status = get_vm_status(vm_name, ns, logger)
+                    logger.debug(f"  [{ns}] status: {status}")
+
+            time.sleep(poll_interval)
+
+    # Final status check for any remaining pending VMs
+    if pending:
+        logger.warning(f"\nTimeout reached. {len(pending)} VMs did not reach Running state:")
+        for ns in pending:
+            status = get_vm_status(vm_name, ns, logger)
+            logger.warning(f"  [{ns}] final status: {status}")
             results[ns] = False
-            continue
 
-        status = get_vm_status(vm_name, ns, logger)
-        results[ns] = (status == "Running")
-
-        if not results[ns]:
-            logger.warning(f"[{ns}] VM did not reach Running state (status: {status})")
+    # Summary
+    running_count = sum(1 for v in results.values() if v)
+    logger.info(f"\nVM startup complete: {running_count}/{len(namespaces)} VMs running")
 
     return results
 
@@ -307,13 +417,16 @@ def migrate_vm_sequential(
     target_node: Optional[str],
     migration_timeout: int,
     logger,
-    max_retries: int = 10,
+    poll_interval: int = 2,
+    max_vmim_retries: int = 10,
+    max_migration_retries: int = 3,
     retry_delay: int = 2
 ) -> Tuple[str, bool, float, Optional[str], Optional[str], Optional[float]]:
     """
     Migrate a single VM and measure time.
 
-    Retries VMIM creation up to `max_retries` times if webhook/internal errors occur.
+    Retries VMIM creation up to `max_vmim_retries` times if webhook/internal errors occur.
+    Retries the entire migration up to `max_migration_retries` times if migration fails.
     """
 
     try:
@@ -325,32 +438,64 @@ def migrate_vm_sequential(
 
         logger.info(f"[{ns}] Starting migration from {source_node}")
 
-        # --- Retry VMIM creation only ---
-        for attempt in range(1, max_retries + 1):
-            try:
-                if migrate_vm(vm_name, ns, target_node, logger):
-                    break
-                else:
-                    logger.warning(f"[{ns}] Failed to trigger migration (attempt {attempt}/{max_retries})")
-            except Exception as e:
-                err_str = str(e)
-                logger.warning(f"[{ns}] Exception creating VMIM (attempt {attempt}/{max_retries}): {err_str}")
+        # Retry the entire migration process if it fails
+        for migration_attempt in range(1, max_migration_retries + 1):
+            vmim_name = f"migration-{vm_name}"
 
-            # backoff before next retry
-            if attempt < max_retries:
-                logger.info(f"[{ns}] Retrying VMIM creation in {retry_delay}s...")
+            # --- Retry VMIM creation only ---
+            vmim_created = False
+            for attempt in range(1, max_vmim_retries + 1):
+                try:
+                    if migrate_vm(vm_name, ns, target_node, logger):
+                        vmim_created = True
+                        break
+                    else:
+                        logger.warning(f"[{ns}] Failed to trigger migration (attempt {attempt}/{max_vmim_retries})")
+                except Exception as e:
+                    err_str = str(e)
+                    logger.warning(f"[{ns}] Exception creating VMIM (attempt {attempt}/{max_vmim_retries}): {err_str}")
+
+                # backoff before next retry
+                if attempt < max_vmim_retries:
+                    logger.info(f"[{ns}] Retrying VMIM creation in {retry_delay}s...")
+                    time.sleep(retry_delay)
+
+            if not vmim_created:
+                logger.error(f"[{ns}] Failed to create VMIM after {max_vmim_retries} attempts")
+                return ns, False, 0.0, source_node, None, None
+
+            # Wait for migration to complete
+            success, observed_duration, actual_target, vmim_duration = wait_for_migration_complete(
+                vm_name, ns, migration_timeout, poll_interval, logger
+            )
+
+            if success:
+                return ns, success, observed_duration, source_node, actual_target, vmim_duration
+
+            # Migration failed - check if we should retry
+            if migration_attempt < max_migration_retries:
+                logger.warning(f"[{ns}] Migration failed (attempt {migration_attempt}/{max_migration_retries})")
+
+                # Delete the failed VMIM before retrying
+                logger.info(f"[{ns}] Deleting failed VMIM '{vmim_name}' before retry...")
+                delete_vmim(vmim_name, ns, logger)
+
+                # Wait a bit for cleanup
                 time.sleep(retry_delay)
-        else:
-            # ran out of retries
-            logger.error(f"[{ns}] Failed to create VMIM after {max_retries} attempts")
-            return ns, False, 0.0, source_node, None, None
 
-        # Wait for migration to complete
-        success, observed_duration, actual_target, vmim_duration = wait_for_migration_complete(
-            vm_name, ns, migration_timeout, logger
-        )
+                # Update source node in case VM moved partially
+                new_source = get_vm_node(vm_name, ns, logger)
+                if new_source and new_source != source_node:
+                    logger.info(f"[{ns}] VM is now on {new_source} (was {source_node})")
+                    source_node = new_source
 
-        return ns, success, observed_duration, source_node, actual_target, vmim_duration
+                logger.info(f"[{ns}] Retrying migration (attempt {migration_attempt + 1}/{max_migration_retries})...")
+            else:
+                logger.error(f"[{ns}] Migration failed after {max_migration_retries} attempts")
+                return ns, False, observed_duration, source_node, None, None
+
+        # Should not reach here, but just in case
+        return ns, False, 0.0, source_node, None, None
 
     except Exception as e:
         logger.error(f"[{ns}] Exception during migration: {e}")
@@ -373,10 +518,8 @@ def main():
     logger.info(f"Namespace prefix: {args.namespace_prefix}")
     logger.info(f"Create VMs: {args.create_vms}")
 
-    if not args.px_version:
-        args.px_version = get_px_version_from_cluster(logger, namespace=args.px_namespace)
-    else:
-        logger.info(f"Using provided PX version: {args.px_version}")
+    if args.storage_version:
+        logger.info(f"Using provided storage version: {args.storage_version}")
 
     if args.round_robin:
         logger.info("Migration mode: Round-robin")
@@ -463,16 +606,20 @@ def main():
             logger.info("Creating VMs without node selector (will be distributed)")
             create_results = create_vms_on_node(namespaces, args.vm_template, None, args.vm_name, logger)
 
-        # Wait for VMs to be running
+        # Wait for VMs to be running (default: 1 hour timeout)
         logger.info("\nWaiting for VMs to reach Running state...")
-        running_results = wait_for_vms_running(namespaces, args.vm_name, 600, logger)
+        running_results = wait_for_vms_running(
+            namespaces, args.vm_name, args.vm_startup_timeout, logger,
+            poll_interval=args.poll_interval
+        )
 
         successful_vms = sum(1 for success in running_results.values() if success)
-        logger.info(f"\nVMs running: {successful_vms}/{len(namespaces)}")
 
         if successful_vms == 0:
             logger.error("No VMs are running. Cannot proceed with migration.")
             sys.exit(1)
+        elif successful_vms < len(namespaces):
+            logger.warning(f"Only {successful_vms}/{len(namespaces)} VMs are running. Proceeding with available VMs.")
 
         # Remove nodeSelectors to allow migration
         if creation_node:
@@ -590,7 +737,11 @@ def main():
         logger.info(f"\nSequential migration from {args.source_node or 'auto-selected node'} to {args.target_node or 'auto-selected node'}")
 
         for ns in namespaces:
-            result = migrate_vm_sequential(ns, args.vm_name, args.target_node, args.migration_timeout, logger)
+            result = migrate_vm_sequential(
+                ns, args.vm_name, args.target_node, args.migration_timeout, logger,
+                poll_interval=args.poll_interval,
+                max_migration_retries=args.max_migration_retries
+            )
             migration_results.append(result)
 
             # Small delay between migrations
@@ -635,7 +786,10 @@ def main():
                     args.vm_name,
                     args.target_node,
                     args.migration_timeout,
-                    logger
+                    logger,
+                    args.poll_interval,
+                    10,  # max_vmim_retries
+                    args.max_migration_retries
                 ): ns for ns in reordered_namespaces
             }
 
@@ -701,8 +855,11 @@ def main():
 
         with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
             futures = {
-                executor.submit(migrate_vm_sequential, ns, args.vm_name, None,
-                              args.migration_timeout, logger): ns
+                executor.submit(
+                    migrate_vm_sequential, ns, args.vm_name, None,
+                    args.migration_timeout, logger, args.poll_interval,
+                    10, args.max_migration_retries
+                ): ns
                 for ns in vms_to_evacuate  # Only migrate VMs on source node
             }
 
@@ -744,8 +901,11 @@ def main():
                 else:
                     target = None
 
-                future = executor.submit(migrate_vm_sequential, ns, args.vm_name, target,
-                                       args.migration_timeout, logger)
+                future = executor.submit(
+                    migrate_vm_sequential, ns, args.vm_name, target,
+                    args.migration_timeout, logger, args.poll_interval,
+                    10, args.max_migration_retries
+                )
                 futures[future] = ns
 
             for future in as_completed(futures):
@@ -765,23 +925,57 @@ def main():
         logger.info("=" * 80)
 
         logger.info(f"\nTesting network connectivity for {len(namespaces)} VMs...")
+        logger.info(f"Timeout: {args.ping_timeout}s (will poll until all VMs respond or timeout)")
 
-        ping_results = {}
-        for ns in namespaces:
-            vm_ip = get_vmi_ip(args.vm_name, ns, logger)
-            if vm_ip:
-                ping_success = ping_vm(vm_ip, args.ssh_pod, args.ssh_pod_ns, logger)
-                ping_results[ns] = ping_success
-                if ping_success:
-                    logger.info(f"[{ns}] Ping successful to {vm_ip}")
+        # Track which VMs still need ping validation
+        pending = set(namespaces)
+        ping_results = {ns: False for ns in namespaces}
+        vm_ips = {}  # Cache VM IPs
+        start_time = time.time()
+        poll_interval = 10  # Check every 10 seconds
+
+        while pending and (time.time() - start_time) < args.ping_timeout:
+            elapsed = time.time() - start_time
+            still_pending = set()
+
+            for ns in pending:
+                # Get VM IP (may not be available immediately after migration)
+                if ns not in vm_ips or vm_ips[ns] is None:
+                    vm_ips[ns] = get_vmi_ip(args.vm_name, ns, logger)
+
+                vm_ip = vm_ips[ns]
+                if vm_ip:
+                    ping_success = ping_vm(vm_ip, args.ssh_pod, args.ssh_pod_ns, logger)
+                    if ping_success:
+                        logger.info(f"[{ns}] Ping successful to {vm_ip}")
+                        ping_results[ns] = True
+                    else:
+                        # Keep trying
+                        still_pending.add(ns)
                 else:
-                    logger.warning(f"[{ns}] Ping failed to {vm_ip}")
-            else:
-                logger.warning(f"[{ns}] Could not get VM IP")
-                ping_results[ns] = False
+                    # No IP yet, keep trying
+                    still_pending.add(ns)
+
+            pending = still_pending
+
+            if pending:
+                successful_count = sum(1 for v in ping_results.values() if v)
+                remaining_time = args.ping_timeout - elapsed
+                logger.info(f"Ping status: {successful_count}/{len(namespaces)} successful | "
+                           f"Pending: {len(pending)} | "
+                           f"Elapsed: {elapsed:.0f}s | "
+                           f"Remaining: {remaining_time:.0f}s")
+                time.sleep(poll_interval)
+
+        # Final status for any remaining pending VMs
+        if pending:
+            logger.warning(f"\nTimeout reached. {len(pending)} VMs did not respond to ping:")
+            for ns in pending:
+                vm_ip = vm_ips.get(ns, "No IP")
+                logger.warning(f"  [{ns}] IP: {vm_ip}")
 
         successful_pings = sum(1 for success in ping_results.values() if success)
-        logger.info(f"\nPing successful: {successful_pings}/{len(namespaces)}")
+        logger.info(f"\nNetwork validation complete: {successful_pings}/{len(namespaces)} VMs reachable")
 
     # Phase 5: Display Results
     logger.info("\n" + "=" * 80)
@@ -866,12 +1060,19 @@ def main():
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         suffix = f"{args.namespace_prefix}_{args.start}-{args.end}"
 
-        out_dir = os.path.join(
-            args.results_folder,
-            args.px_version,
-            f"{num_disks}-disk",
-            f"{timestamp}_live_migration_{suffix}"
-        )
+        if args.storage_version:
+            out_dir = os.path.join(
+                args.results_folder,
+                args.storage_version,
+                f"{num_disks}-disk",
+                f"{timestamp}_live_migration_{suffix}"
+            )
+        else:
+            out_dir = os.path.join(
+                args.results_folder,
+                f"{num_disks}-disk",
+                f"{timestamp}_live_migration_{suffix}"
+            )
         os.makedirs(out_dir, exist_ok=True)
 
         logger.info(f"Created results directory: {out_dir}")

@@ -3,12 +3,12 @@
 KubeVirt VM Creation Performance Test - DataSource Clone Method
 
 This script measures VM creation and boot performance when cloning from
-KubeVirt DataSource objects. Optimized for Pure FlashArray Direct Access (FADA).
+KubeVirt DataSource objects. Works with any CSI-compatible storage backend.
 
 Usage:
     python3 measure-vm-creation-time.py --start 1 --end 100 --vm-name rhel-9-vm
 
-Author: Portworx
+Author: KubeVirt Benchmark Suite Contributors
 License: Apache 2.0
 """
 
@@ -30,7 +30,7 @@ from utils.common import (
     delete_namespace, get_vm_status, get_vmi_ip, ping_vm, print_summary_table,
     validate_prerequisites, stop_vm, start_vm, wait_for_vm_stopped,
     get_worker_nodes, select_random_node, add_node_selector_to_vm_yaml,
-    cleanup_test_namespaces, confirm_cleanup, print_cleanup_summary, save_results, get_px_version_from_cluster
+    cleanup_test_namespaces, confirm_cleanup, print_cleanup_summary, save_results
 )
 
 # Default configuration
@@ -215,19 +215,12 @@ Examples:
         help='Base directory to store test results (default: ../results)'
     )
 
-    # Portworx version grouping
+    # Storage version grouping (optional)
     parser.add_argument(
-        '--px-version',
+        '--storage-version',
         type=str,
         default=None,
-        help='Portworx version to include in results path (auto-detect if not provided)'
-    )
-
-    parser.add_argument(
-        '--px-namespace',
-        type=str,
-        default="portworx",
-        help='Default namespace where Portworx is installed'
+        help='Storage version to include in results path (optional)'
     )
 
     
@@ -277,15 +270,19 @@ def ensure_namespaces(start: int, end: int, prefix: str, batch_size: int, logger
     return namespaces
 
 
-def create_vm(ns: str, vm_yaml: str, node_name: Optional[str], logger) -> Tuple[str, datetime]:
+def create_vm(ns: str, vm_yaml: str, node_name: Optional[str], logger,
+              max_retries: int = 5, initial_delay: float = 2.0) -> Tuple[str, datetime]:
     """
-    Create a VM in the specified namespace.
+    Create a VM in the specified namespace with retry logic.
 
     Args:
         ns: Namespace name
         vm_yaml: Path to VM YAML file
         node_name: Optional node name to pin VM to
         logger: Logger instance
+        max_retries: Maximum number of retry attempts (default: 5)
+        initial_delay: Initial delay between retries in seconds (default: 2.0)
+                      Uses exponential backoff: delay * 2^attempt
 
     Returns:
         Tuple of (namespace, creation_timestamp)
@@ -293,52 +290,89 @@ def create_vm(ns: str, vm_yaml: str, node_name: Optional[str], logger) -> Tuple[
     logger.info(f"[{ns}] Creating VM from {vm_yaml}")
     start_ts = datetime.now()
 
-    try:
-        # If node_name is specified, modify YAML to add nodeSelector
-        if node_name:
-            logger.debug(f"[{ns}] Adding nodeSelector for node: {node_name}")
-            modified_yaml = add_node_selector_to_vm_yaml(vm_yaml, node_name, logger)
+    # List of retryable error patterns
+    retryable_errors = [
+        'context deadline exceeded',
+        'webhook',
+        'Internal error',
+        'InternalError',
+        'connection refused',
+        'timeout',
+        'temporarily unavailable'
+    ]
 
-            if modified_yaml:
-                # Create VM using modified YAML via stdin
-                process = subprocess.Popen(
-                    ['kubectl', 'create', '-f', '-', '-n', ns],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                stdout, stderr = process.communicate(input=modified_yaml)
-                returncode = process.returncode
+    for attempt in range(1, max_retries + 1):
+        try:
+            # If node_name is specified, modify YAML to add nodeSelector
+            if node_name:
+                logger.debug(f"[{ns}] Adding nodeSelector for node: {node_name}")
+                modified_yaml = add_node_selector_to_vm_yaml(vm_yaml, node_name, logger)
+
+                if modified_yaml:
+                    # Create VM using modified YAML via stdin
+                    process = subprocess.Popen(
+                        ['kubectl', 'create', '-f', '-', '-n', ns],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    stdout, stderr = process.communicate(input=modified_yaml)
+                    returncode = process.returncode
+                else:
+                    logger.warning(f"[{ns}] Failed to modify YAML, creating without nodeSelector")
+                    returncode, stdout, stderr = run_kubectl_command(
+                        ['create', '-f', vm_yaml, '-n', ns],
+                        check=False,
+                        logger=logger
+                    )
             else:
-                logger.warning(f"[{ns}] Failed to modify YAML, creating without nodeSelector")
+                # Create VM normally without nodeSelector
                 returncode, stdout, stderr = run_kubectl_command(
                     ['create', '-f', vm_yaml, '-n', ns],
                     check=False,
                     logger=logger
                 )
-        else:
-            # Create VM normally without nodeSelector
-            returncode, stdout, stderr = run_kubectl_command(
-                ['create', '-f', vm_yaml, '-n', ns],
-                check=False,
-                logger=logger
-            )
 
-        if returncode == 0:
-            logger.info(f"[{ns}] VM creation API call completed")
-        else:
-            if 'AlreadyExists' in stderr:
-                logger.warning(f"[{ns}] VM already exists, continuing with existing VM")
+            if returncode == 0:
+                logger.info(f"[{ns}] VM creation API call completed")
+                return ns, start_ts
             else:
-                logger.error(f"[{ns}] VM creation failed: {stderr}")
-                raise RuntimeError(f"Failed to create VM in {ns}: {stderr}")
+                if 'AlreadyExists' in stderr:
+                    logger.warning(f"[{ns}] VM already exists, continuing with existing VM")
+                    return ns, start_ts
 
-    except Exception as e:
-        logger.error(f"[{ns}] Exception during VM creation: {e}")
-        raise
+                # Check if it's a retryable error
+                is_retryable = any(err in stderr for err in retryable_errors)
 
-    return ns, start_ts
+                if is_retryable and attempt < max_retries:
+                    delay = initial_delay * (2 ** (attempt - 1))  # Exponential backoff
+                    logger.warning(f"[{ns}] Retryable error (attempt {attempt}/{max_retries}): {stderr.strip()}")
+                    logger.info(f"[{ns}] Retrying in {delay:.1f}s...")
+                    time.sleep(delay)
+                    continue
+                elif is_retryable:
+                    logger.error(f"[{ns}] VM creation failed after {max_retries} attempts: {stderr}")
+                    raise RuntimeError(f"Failed to create VM in {ns} after {max_retries} attempts: {stderr}")
+                else:
+                    # Non-retryable error
+                    logger.error(f"[{ns}] VM creation failed: {stderr}")
+                    raise RuntimeError(f"Failed to create VM in {ns}: {stderr}")
+
+        except RuntimeError:
+            raise
+        except Exception as e:
+            if attempt < max_retries:
+                delay = initial_delay * (2 ** (attempt - 1))
+                logger.warning(f"[{ns}] Exception (attempt {attempt}/{max_retries}): {e}")
+                logger.info(f"[{ns}] Retrying in {delay:.1f}s...")
+                time.sleep(delay)
+            else:
+                logger.error(f"[{ns}] Exception after {max_retries} attempts: {e}")
+                raise
+
+    # Should not reach here, but just in case
+    raise RuntimeError(f"Failed to create VM in {ns} after {max_retries} attempts")
 
 
 def wait_for_vm_running(ns: str, vm_name: str, start_ts: datetime, poll_interval: int, logger) -> Tuple[str, float]:
@@ -603,10 +637,8 @@ def main():
     logger.info("=" * 80)
     num_disks_per_vm = 1
 
-    if not args.px_version:
-        args.px_version = get_px_version_from_cluster(logger, namespace=args.px_namespace)
-    else:
-        logger.info(f"Using provided PX version: {args.px_version}")
+    if args.storage_version:
+        logger.info(f"Using provided storage version: {args.storage_version}")
 
     try:
         with open(args.vm_template, 'r') as f:
@@ -745,8 +777,11 @@ def main():
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         suffix = f"{args.namespace_prefix}_{args.start}-{args.end}"
 
-        # Construct versioned results path dynamically
-        out_dir = os.path.join(args.results_folder, args.px_version, f"{num_disks_per_vm}-disk", f"{timestamp}_{suffix}")
+        # Construct results path dynamically
+        if args.storage_version:
+            out_dir = os.path.join(args.results_folder, args.storage_version, f"{num_disks_per_vm}-disk", f"{timestamp}_{suffix}")
+        else:
+            out_dir = os.path.join(args.results_folder, f"{num_disks_per_vm}-disk", f"{timestamp}_{suffix}")
         os.makedirs(out_dir, exist_ok=True)
 
         logger.info(f"Created results directory: {out_dir}")
