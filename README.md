@@ -886,8 +886,7 @@ virtbench capacity-benchmark \
   --vms 10 \
   --skip-resize-job \
   --skip-restart-job \
-  --skip-snapshot-job \
-  --skip-migration-job
+  --skip-snapshot-job
 
 # Test volume expansion limits
 virtbench capacity-benchmark \
@@ -902,14 +901,13 @@ virtbench capacity-benchmark \
 ```bash
 cd capacity-benchmark
 
-# Test only VM creation capacity (skip resize, restart, snapshot, migration)
+# Test only VM creation capacity (skip resize, restart, snapshot)
 python3 measure-capacity.py \
   --storage-class YOUR-STORAGE-CLASS \
   --vms 10 \
   --skip-resize-job \
   --skip-restart-job \
-  --skip-snapshot-job \
-  --skip-migration-job
+  --skip-snapshot-job
 
 # Test volume expansion limits
 python3 measure-capacity.py \
@@ -1505,7 +1503,6 @@ kubectl get storageclass
 | Option | Description |
 |--------|-------------|
 | `--skip-resize-job` | Skip volume resize phase |
-| `--skip-migration-job` | Skip migration phase |
 | `--skip-snapshot-job` | Skip snapshot phase |
 | `--skip-restart-job` | Skip restart phase |
 
@@ -1617,13 +1614,6 @@ Detailed logs are saved to the specified log file with:
   kubectl get volumesnapshotclass
   ```
 - If not available, use `--skip-snapshot-job` to skip this phase
-
-**Issue**: Migration fails during capacity test
-- Check if your storage class supports ReadWriteMany (RWX):
-  ```bash
-  kubectl get storageclass YOUR-STORAGE-CLASS -o yaml | grep -A5 parameters
-  ```
-- If RWX is not supported, use `--skip-migration-job` to skip this phase
 
 **Issue**: Out of resources (VM creation fails or PVC pending)
 - This indicates you've reached capacity limits. Check:
