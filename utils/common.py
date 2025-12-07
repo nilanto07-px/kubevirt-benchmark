@@ -933,39 +933,87 @@ def wait_for_vm_stopped(vm_name: str, namespace: str, timeout: int = 300,
 
 def get_worker_nodes(logger: Optional[logging.Logger] = None) -> List[str]:
     """
-    Get list of worker nodes in the cluster.
+    Get list of worker nodes in the cluster that are in Ready state.
 
     Args:
         logger: Logger instance
 
     Returns:
-        List of worker node names
+        List of Ready worker node names
     """
+    import json
+
     try:
+        # Get worker nodes with full JSON output to check status
         returncode, stdout, stderr = run_kubectl_command(
-            ['get', 'nodes', '-l', 'node-role.kubernetes.io/worker=',
-             '-o', 'jsonpath={.items[*].metadata.name}'],
+            ['get', 'nodes', '-l', 'node-role.kubernetes.io/worker=', '-o', 'json'],
             logger=logger
         )
 
         if returncode == 0 and stdout:
-            nodes = stdout.strip().split()
+            data = json.loads(stdout)
+            nodes = data.get('items', [])
+            ready_nodes = []
+            not_ready_nodes = []
+
+            for node in nodes:
+                node_name = node.get('metadata', {}).get('name')
+                conditions = node.get('status', {}).get('conditions', [])
+
+                # Check if node is Ready
+                is_ready = False
+                for condition in conditions:
+                    if condition.get('type') == 'Ready' and condition.get('status') == 'True':
+                        is_ready = True
+                        break
+
+                if is_ready:
+                    ready_nodes.append(node_name)
+                else:
+                    not_ready_nodes.append(node_name)
+
             if logger:
-                logger.info(f"Found {len(nodes)} worker nodes: {', '.join(nodes)}")
-            return nodes
+                logger.info(f"Found {len(ready_nodes)} Ready worker nodes: {', '.join(ready_nodes)}")
+                if not_ready_nodes:
+                    logger.warning(f"Skipping {len(not_ready_nodes)} NotReady worker nodes: {', '.join(not_ready_nodes)}")
+
+            return ready_nodes
         else:
             if logger:
                 logger.warning("No worker nodes found, trying all nodes...")
-            # Fallback: get all nodes
+            # Fallback: get all nodes with Ready status check
             returncode, stdout, stderr = run_kubectl_command(
-                ['get', 'nodes', '-o', 'jsonpath={.items[*].metadata.name}'],
+                ['get', 'nodes', '-o', 'json'],
                 logger=logger
             )
             if returncode == 0 and stdout:
-                nodes = stdout.strip().split()
+                data = json.loads(stdout)
+                nodes = data.get('items', [])
+                ready_nodes = []
+                not_ready_nodes = []
+
+                for node in nodes:
+                    node_name = node.get('metadata', {}).get('name')
+                    conditions = node.get('status', {}).get('conditions', [])
+
+                    # Check if node is Ready
+                    is_ready = False
+                    for condition in conditions:
+                        if condition.get('type') == 'Ready' and condition.get('status') == 'True':
+                            is_ready = True
+                            break
+
+                    if is_ready:
+                        ready_nodes.append(node_name)
+                    else:
+                        not_ready_nodes.append(node_name)
+
                 if logger:
-                    logger.info(f"Found {len(nodes)} nodes: {', '.join(nodes)}")
-                return nodes
+                    logger.info(f"Found {len(ready_nodes)} Ready nodes: {', '.join(ready_nodes)}")
+                    if not_ready_nodes:
+                        logger.warning(f"Skipping {len(not_ready_nodes)} NotReady nodes: {', '.join(not_ready_nodes)}")
+
+                return ready_nodes
 
         return []
     except Exception as e:
@@ -974,22 +1022,70 @@ def get_worker_nodes(logger: Optional[logging.Logger] = None) -> List[str]:
         return []
 
 
+def is_node_ready(node_name: str, logger: Optional[logging.Logger] = None) -> bool:
+    """
+    Check if a specific node is in Ready state.
+
+    Args:
+        node_name: Name of the node to check
+        logger: Logger instance
+
+    Returns:
+        True if node is Ready, False otherwise
+    """
+    import json
+
+    try:
+        returncode, stdout, stderr = run_kubectl_command(
+            ['get', 'node', node_name, '-o', 'json'],
+            check=False,
+            logger=logger
+        )
+
+        if returncode != 0:
+            if logger:
+                logger.error(f"Node {node_name} not found")
+            return False
+
+        data = json.loads(stdout)
+        conditions = data.get('status', {}).get('conditions', [])
+
+        for condition in conditions:
+            if condition.get('type') == 'Ready':
+                is_ready = condition.get('status') == 'True'
+                if logger:
+                    if is_ready:
+                        logger.info(f"Node {node_name} is Ready")
+                    else:
+                        logger.warning(f"Node {node_name} is NotReady")
+                return is_ready
+
+        if logger:
+            logger.warning(f"Node {node_name} has no Ready condition")
+        return False
+
+    except Exception as e:
+        if logger:
+            logger.error(f"Failed to check node {node_name} status: {e}")
+        return False
+
+
 def select_random_node(logger: Optional[logging.Logger] = None) -> Optional[str]:
     """
-    Select a random worker node from the cluster.
+    Select a random Ready worker node from the cluster.
 
     Args:
         logger: Logger instance
 
     Returns:
-        Node name or None if no nodes found
+        Node name or None if no Ready nodes found
     """
     import random
 
     nodes = get_worker_nodes(logger)
     if not nodes:
         if logger:
-            logger.error("No worker nodes available")
+            logger.error("No Ready worker nodes available")
         return None
 
     selected_node = random.choice(nodes)
