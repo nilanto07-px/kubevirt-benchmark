@@ -1358,7 +1358,7 @@ python3 validate_cluster.py --all --storage-class YOUR-STORAGE-CLASS
 # With custom DataSource
 python3 validate_cluster.py \
   --storage-class YOUR-STORAGE-CLASS \
-  --datasource fedora \
+  --datasource debian \
   --datasource-namespace openshift-virtualization-os-images
 ```
 
