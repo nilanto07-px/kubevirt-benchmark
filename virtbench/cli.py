@@ -4,31 +4,31 @@ virtbench - KubeVirt Benchmark Suite CLI
 
 Main entry point for the virtbench command-line interface.
 """
-import click
-from pathlib import Path
 
-from virtbench.common import find_repo_root
+import click
+
 from virtbench.commands import (
-    datasource_clone,
-    migration,
     capacity,
+    datasource_clone,
     failure_recovery,
+    migration,
     validate,
     version,
 )
+from virtbench.common import find_repo_root
 
 
 class Context:
     """Global context for sharing state between commands"""
-    
+
     def __init__(self):
-        self.log_level = 'info'
+        self.log_level = "info"
         self.log_file = None
         self.kubeconfig = None
-        self.timeout = '4h'
+        self.timeout = "4h"
         self.uuid = None
         self.repo_root = None
-    
+
     def initialize(self):
         """Initialize context (find repo root)"""
         try:
@@ -39,30 +39,25 @@ class Context:
 
 
 @click.group()
-@click.version_option(version='1.0.0', prog_name='virtbench')
-@click.option('--log-level', 
-              default='info',
-              type=click.Choice(['debug', 'info', 'warn', 'error'], case_sensitive=False),
-              help='Log level')
-@click.option('--log-file', 
-              type=click.Path(),
-              help='Log file path (auto-generated if not specified)')
-@click.option('--kubeconfig', 
-              type=click.Path(exists=True),
-              help='Path to kubeconfig file')
-@click.option('--timeout', 
-              default='4h',
-              help='Benchmark timeout (default: 4h)')
-@click.option('--uuid', 
-              help='Benchmark UUID (auto-generated if not specified)')
+@click.version_option(version="1.0.0", prog_name="virtbench")
+@click.option(
+    "--log-level",
+    default="info",
+    type=click.Choice(["debug", "info", "warn", "error"], case_sensitive=False),
+    help="Log level",
+)
+@click.option("--log-file", type=click.Path(), help="Log file path (auto-generated if not specified)")
+@click.option("--kubeconfig", type=click.Path(exists=True), help="Path to kubeconfig file")
+@click.option("--timeout", default="4h", help="Benchmark timeout (default: 4h)")
+@click.option("--uuid", help="Benchmark UUID (auto-generated if not specified)")
 @click.pass_context
 def cli(ctx, log_level, log_file, kubeconfig, timeout, uuid):
     """
     virtbench - KubeVirt Benchmark Suite
-    
+
     Performance testing toolkit for KubeVirt virtual machines running on
     OpenShift Container Platform (OCP).
-    
+
     \b
     Available Commands:
       datasource-clone     Run DataSource clone benchmark
@@ -71,7 +66,7 @@ def cli(ctx, log_level, log_file, kubeconfig, timeout, uuid):
       failure-recovery     Run failure recovery benchmark
       validate-cluster     Validate cluster prerequisites
       version              Print version information
-    
+
     \b
     Examples:
       # Validate cluster
@@ -82,7 +77,7 @@ def cli(ctx, log_level, log_file, kubeconfig, timeout, uuid):
 
       # Run migration test
       virtbench migration --start 1 --end 5 --source-node worker-1
-    
+
     \b
     Global Flags:
       --log-level          Log level: debug, info, warn, error (default: info)
@@ -98,7 +93,7 @@ def cli(ctx, log_level, log_file, kubeconfig, timeout, uuid):
     ctx.obj.kubeconfig = kubeconfig
     ctx.obj.timeout = timeout
     ctx.obj.uuid = uuid
-    
+
     # Initialize context (find repo root)
     ctx.obj.initialize()
 
@@ -117,6 +112,5 @@ def main():
     cli(obj=None)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
-

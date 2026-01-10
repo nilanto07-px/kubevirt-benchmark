@@ -18,7 +18,7 @@ spec:
             requests:
               storage: 30Gi
           # Update with your StorageClass name
-          storageClassName: {{STORAGE_CLASS_NAME}}
+          storageClassName: px-rwx-file-kubevirt
           volumeMode: Block
   runStrategy: Always
   template:
@@ -77,4 +77,3 @@ spec:
                 - qemu-guest-agent
               runcmd:
                 - systemctl enable --now qemu-guest-agent
-

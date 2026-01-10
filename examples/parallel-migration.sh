@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Parallel Migration Example
-# 
+#
 # This script demonstrates parallel VM migration with configurable concurrency.
 # Multiple VMs are migrated simultaneously to test performance under load.
 #
@@ -11,6 +11,8 @@
 # Example:
 #   ./parallel-migration.sh worker-1 worker-2 50 10
 #
+# Author: KubeVirt Benchmark Suite Contributors
+# License: Apache 2.0
 
 set -e
 
@@ -50,4 +52,3 @@ echo "=========================================="
 echo "Test Complete!"
 echo "Log file: $LOG_FILE"
 echo "=========================================="
-

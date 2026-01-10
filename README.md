@@ -27,6 +27,7 @@ A comprehensive, vendor-neutral performance testing toolkit for KubeVirt virtual
 - [Troubleshooting](#troubleshooting)
 - [Best Practices](#best-practices)
 - [Repository Structure](#repository-structure)
+- [Development](#development)
 - [License](#license)
 
 ---
@@ -310,7 +311,7 @@ kubectl get storageclass
 
 ```
 
-#### Step 5: Configure Your Storage Class 
+#### Step 5: Configure Your Storage Class
 
 > **⚠️ CRITICAL:** This is the most important configuration step. All benchmarks require a properly configured storage class.
 
@@ -2028,6 +2029,23 @@ kubevirt-benchmark-suite/
 | **Owner** | [@adityadani](https://github.com/adityadani) | Repository maintenance, CI issues, releases |
 
 For questions about this project, please reach out to any of the maintainers above.
+
+---
+
+## Development
+
+Before committing changes, install and run pre-commit hooks:
+
+```bash
+# One-time setup
+pip install -r requirements.txt
+pre-commit install
+
+# Before each commit (runs automatically after install)
+pre-commit run --all-files
+```
+
+This runs linting (ruff), formatting, type checking (mypy), and other code quality checks. See `pyproject.toml` and `.pre-commit-config.yaml` for configuration details.
 
 ---
 

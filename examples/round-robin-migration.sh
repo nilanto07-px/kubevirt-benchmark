@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Round-Robin Migration Example
-# 
+#
 # This script demonstrates round-robin VM migration across all available nodes.
 # VMs are distributed evenly across the cluster for load balancing.
 #
@@ -11,6 +11,8 @@
 # Example:
 #   ./round-robin-migration.sh 100 20
 #
+# Author: KubeVirt Benchmark Suite Contributors
+# License: Apache 2.0
 
 set -e
 
@@ -52,4 +54,3 @@ echo ""
 echo "VM distribution across nodes:"
 kubectl get vmi -A -o wide | grep "$NAMESPACE_PREFIX" | awk '{print $7}' | sort | uniq -c
 echo "=========================================="
-

@@ -8,3 +8,10 @@ pyyaml~=6.0.3
 # CLI dependencies
 click~=8.1.7
 rich~=13.7.0
+
+# Development dependencies (linting, formatting, type checking)
+ruff>=0.8.0
+mypy>=1.8.0
+pre-commit>=3.6.0
+types-PyYAML>=6.0.0
+pandas-stubs>=2.0.0

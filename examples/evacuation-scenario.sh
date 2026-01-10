@@ -16,6 +16,8 @@
 #   ./evacuation-scenario.sh worker-3 100 20
 #   ./evacuation-scenario.sh auto 100 20
 #
+# Author: KubeVirt Benchmark Suite Contributors
+# License: Apache 2.0
 
 set -e
 
@@ -99,4 +101,3 @@ if [[ "$SOURCE_NODE" != "auto" ]]; then
     echo "Node $SOURCE_NODE is now ready for maintenance."
 fi
 echo "=========================================="
-

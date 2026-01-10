@@ -1,20 +1,20 @@
 #!/bin/bash
-"""
-Orchestrate a complete Fence Agents Remediation (FAR) test.
-
-This script:
-1. Removes node selectors from VMs to allow rescheduling
-2. Applies FAR configuration to trigger node failure
-3. Waits for node remediation
-4. Removes FAR configuration
-5. Measures VM recovery time
-
-Usage:
-    ./run-far-test.sh --start 1 --end 60 --node-name worker-1 --vm-name rhel-9-vm
-
-Author: KubeVirt Benchmark Suite Contributors
-License: Apache 2.0
-"""
+#
+# Orchestrate a complete Fence Agents Remediation (FAR) test.
+#
+# This script:
+# 1. Removes node selectors from VMs to allow rescheduling
+# 2. Applies FAR configuration to trigger node failure
+# 3. Waits for node remediation
+# 4. Removes FAR configuration
+# 5. Measures VM recovery time
+#
+# Usage:
+#     ./run-far-test.sh --start 1 --end 60 --node-name worker-1 --vm-name rhel-9-vm
+#
+# Author: KubeVirt Benchmark Suite Contributors
+# License: Apache 2.0
+#
 
 set -euo pipefail
 
@@ -270,4 +270,3 @@ else
     log_error "Recovery test failed"
     exit 1
 fi
-

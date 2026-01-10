@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Sequential Migration Example
-# 
+#
 # This script demonstrates sequential VM migration from one node to another.
 # VMs are migrated one by one to measure individual migration performance.
 #
@@ -11,6 +11,8 @@
 # Example:
 #   ./sequential-migration.sh worker-1 worker-2 20
 #
+# Author: KubeVirt Benchmark Suite Contributors
+# License: Apache 2.0
 
 set -e
 
@@ -46,4 +48,3 @@ echo "=========================================="
 echo "Test Complete!"
 echo "Log file: $LOG_FILE"
 echo "=========================================="
-

@@ -27,163 +27,197 @@ License: Apache 2.0
 
 import argparse
 import os
+import random
 import subprocess
 import sys
 import time
-import random
-import yaml
-from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Tuple, Dict, List, Optional
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+
+import yaml
+
 
 # Add parent directory to path for imports
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from utils.common import (
-    setup_logging, run_kubectl_command, create_namespace, create_namespaces_parallel,
-    delete_namespace, get_vm_status, get_vmi_ip, ping_vm, print_summary_table,
-    validate_prerequisites, get_worker_nodes, select_random_node,
-    add_node_selector_to_vm_yaml, get_vm_node, migrate_vm, get_migration_status,
-    wait_for_migration_complete, get_available_nodes, create_namespace,
-    find_busiest_node, get_vms_on_node, remove_node_selectors,
-    cleanup_test_namespaces, confirm_cleanup, print_cleanup_summary,
-    list_resources_in_namespace, delete_vmim, save_migration_results
+    add_node_selector_to_vm_yaml,
+    cleanup_test_namespaces,
+    confirm_cleanup,
+    create_namespaces_parallel,
+    delete_vmim,
+    find_busiest_node,
+    get_available_nodes,
+    get_vm_node,
+    get_vm_status,
+    get_vmi_ip,
+    get_vms_on_node,
+    get_worker_nodes,
+    list_resources_in_namespace,
+    migrate_vm,
+    ping_vm,
+    print_cleanup_summary,
+    remove_node_selectors,
+    save_migration_results,
+    select_random_node,
+    setup_logging,
+    validate_prerequisites,
+    wait_for_migration_complete,
 )
 
+
 # Default configuration
-DEFAULT_VM_NAME = 'rhel-9-vm'
-DEFAULT_NAMESPACE_PREFIX = 'kubevirt-perf-test'
-DEFAULT_VM_YAML = '../examples/vm-templates/rhel9-vm-datasource.yaml'
+DEFAULT_VM_NAME = "rhel-9-vm"
+DEFAULT_NAMESPACE_PREFIX = "kubevirt-perf-test"
+DEFAULT_VM_YAML = "../examples/vm-templates/rhel9-vm-datasource.yaml"
 
 
 def parse_arguments():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description='Measure KubeVirt VM live migration performance.',
+        description="Measure KubeVirt VM live migration performance.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Sequential migration from node-1 to node-2
   python3 measure-vm-migration-time.py --start 1 --end 10 --source-node worker-1 --target-node worker-2
-  
+
   # Parallel migration with 10 concurrent migrations
   python3 measure-vm-migration-time.py --start 1 --end 50 --source-node worker-1 --target-node worker-2 --parallel --concurrency 10
-  
+
   # Evacuate all VMs from node-1
   python3 measure-vm-migration-time.py --start 1 --end 100 --source-node worker-1 --evacuate
-  
+
   # Round-robin migration across all nodes
   python3 measure-vm-migration-time.py --start 1 --end 100 --round-robin
-  
+
   # Create VMs first, then migrate
   python3 measure-vm-migration-time.py --start 1 --end 10 --create-vms --source-node worker-1 --target-node worker-2
-        """
-    )
-    
-    # VM range
-    parser.add_argument('-s', '--start', type=int, default=1,
-                       help='Start index for test namespaces (default: 1)')
-    parser.add_argument('-e', '--end', type=int, default=10,
-                       help='End index for test namespaces (default: 10)')
-    parser.add_argument('-n', '--vm-name', type=str, default=DEFAULT_VM_NAME,
-                       help=f'VM name (default: {DEFAULT_VM_NAME})')
-    
-    # Namespace configuration
-    parser.add_argument('--namespace-prefix', type=str, default=DEFAULT_NAMESPACE_PREFIX,
-                       help=f'Prefix for test namespaces (default: {DEFAULT_NAMESPACE_PREFIX})')
-    
-    # VM creation
-    parser.add_argument('--create-vms', action='store_true',
-                       help='Create VMs before migration (default: use existing VMs)')
-    parser.add_argument('--vm-template', type=str, default=DEFAULT_VM_YAML,
-                       help=f'VM template YAML file (default: {DEFAULT_VM_YAML})')
-    parser.add_argument('--single-node', action='store_true',
-                       help='Create all VMs on a single node (requires --create-vms)')
-    parser.add_argument('--node-name', type=str, default=None,
-                       help='Specific node to create VMs on (requires --single-node and --create-vms)')
-    
-    # Migration scenarios
-    parser.add_argument('--source-node', type=str, default=None,
-                       help='Source node name (required for sequential/parallel/evacuate)')
-    parser.add_argument('--target-node', type=str, default=None,
-                       help='Target node name (optional, auto-select if not specified)')
-    parser.add_argument('--parallel', action='store_true',
-                       help='Migrate VMs in parallel (default: sequential)')
-    parser.add_argument('--evacuate', action='store_true',
-                       help='Evacuate all VMs from source node to any available nodes')
-    parser.add_argument('--auto-select-busiest', action='store_true',
-                       help='Auto-select the node with most VMs for evacuation (requires --evacuate)')
-    parser.add_argument('--round-robin', action='store_true',
-                       help='Migrate VMs in round-robin fashion across all nodes')
-    
-    # Performance options
-    parser.add_argument('-c', '--concurrency', type=int, default=10,
-                       help='Number of concurrent migrations (default: 10)')
-    parser.add_argument('--poll-interval', type=int, default=5,
-                       help='Seconds between status checks (default: 5)')
-    parser.add_argument('--migration-timeout', type=int, default=600,
-                       help='Timeout for each migration in seconds (default: 600)')
-    parser.add_argument('--vm-startup-timeout', type=int, default=3600,
-                       help='Timeout waiting for VMs to reach Running state in seconds (default: 3600 = 1 hour)')
-    parser.add_argument('--max-migration-retries', type=int, default=3,
-                       help='Maximum retries for failed migrations (default: 3)')
-    
-    # Validation options
-    parser.add_argument('--ssh-pod', type=str, default='ssh-test-pod',
-                       help='SSH test pod name for ping tests (default: ssh-test-pod)')
-    parser.add_argument('--ssh-pod-ns', type=str, default='default',
-                       help='SSH test pod namespace (default: default)')
-    parser.add_argument('--ping-timeout', type=int, default=3600,
-                       help='Timeout for ping validation in seconds (default: 3600 = 1 hour)')
-    parser.add_argument('--skip-ping', action='store_true',
-                       help='Skip ping validation after migration')
-    
-    # Logging options
-    parser.add_argument('--log-file', type=str, default=None,
-                       help='Log file path (default: console only)')
-    parser.add_argument('--log-level', type=str, default='INFO',
-                       choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
-                       help='Logging level (default: INFO)')
-    
-    # Cleanup options
-    parser.add_argument('--cleanup', action='store_true',
-                       help='Delete VMs, VMIMs, and namespaces after test')
-    parser.add_argument('--cleanup-on-failure', action='store_true',
-                       help='Clean up resources even if tests fail')
-    parser.add_argument('--dry-run-cleanup', action='store_true',
-                       help='Show what would be deleted without actually deleting')
-    parser.add_argument('--yes', action='store_true',
-                       help='Skip confirmation prompt for cleanup (use with caution)')
-    parser.add_argument('--skip-checks', action='store_true',
-                       help='Skip VM verifications before migration')
-    parser.add_argument(
-        '--save-results',
-        action='store_true',
-        help='Save detailed migration results (JSON and CSV) under results/.'
+        """,
     )
 
+    # VM range
+    parser.add_argument("-s", "--start", type=int, default=1, help="Start index for test namespaces (default: 1)")
+    parser.add_argument("-e", "--end", type=int, default=10, help="End index for test namespaces (default: 10)")
     parser.add_argument(
-        '--storage-version',
+        "-n", "--vm-name", type=str, default=DEFAULT_VM_NAME, help=f"VM name (default: {DEFAULT_VM_NAME})"
+    )
+
+    # Namespace configuration
+    parser.add_argument(
+        "--namespace-prefix",
+        type=str,
+        default=DEFAULT_NAMESPACE_PREFIX,
+        help=f"Prefix for test namespaces (default: {DEFAULT_NAMESPACE_PREFIX})",
+    )
+
+    # VM creation
+    parser.add_argument(
+        "--create-vms", action="store_true", help="Create VMs before migration (default: use existing VMs)"
+    )
+    parser.add_argument(
+        "--vm-template", type=str, default=DEFAULT_VM_YAML, help=f"VM template YAML file (default: {DEFAULT_VM_YAML})"
+    )
+    parser.add_argument(
+        "--single-node", action="store_true", help="Create all VMs on a single node (requires --create-vms)"
+    )
+    parser.add_argument(
+        "--node-name",
         type=str,
         default=None,
-        help='Storage version to include in results path (optional)'
+        help="Specific node to create VMs on (requires --single-node and --create-vms)",
     )
 
+    # Migration scenarios
     parser.add_argument(
-        '--results-folder',
+        "--source-node", type=str, default=None, help="Source node name (required for sequential/parallel/evacuate)"
+    )
+    parser.add_argument(
+        "--target-node", type=str, default=None, help="Target node name (optional, auto-select if not specified)"
+    )
+    parser.add_argument("--parallel", action="store_true", help="Migrate VMs in parallel (default: sequential)")
+    parser.add_argument(
+        "--evacuate", action="store_true", help="Evacuate all VMs from source node to any available nodes"
+    )
+    parser.add_argument(
+        "--auto-select-busiest",
+        action="store_true",
+        help="Auto-select the node with most VMs for evacuation (requires --evacuate)",
+    )
+    parser.add_argument(
+        "--round-robin", action="store_true", help="Migrate VMs in round-robin fashion across all nodes"
+    )
+
+    # Performance options
+    parser.add_argument(
+        "-c", "--concurrency", type=int, default=10, help="Number of concurrent migrations (default: 10)"
+    )
+    parser.add_argument("--poll-interval", type=int, default=5, help="Seconds between status checks (default: 5)")
+    parser.add_argument(
+        "--migration-timeout", type=int, default=600, help="Timeout for each migration in seconds (default: 600)"
+    )
+    parser.add_argument(
+        "--vm-startup-timeout",
+        type=int,
+        default=3600,
+        help="Timeout waiting for VMs to reach Running state in seconds (default: 3600 = 1 hour)",
+    )
+    parser.add_argument(
+        "--max-migration-retries", type=int, default=3, help="Maximum retries for failed migrations (default: 3)"
+    )
+
+    # Validation options
+    parser.add_argument(
+        "--ssh-pod", type=str, default="ssh-test-pod", help="SSH test pod name for ping tests (default: ssh-test-pod)"
+    )
+    parser.add_argument("--ssh-pod-ns", type=str, default="default", help="SSH test pod namespace (default: default)")
+    parser.add_argument(
+        "--ping-timeout", type=int, default=3600, help="Timeout for ping validation in seconds (default: 3600 = 1 hour)"
+    )
+    parser.add_argument("--skip-ping", action="store_true", help="Skip ping validation after migration")
+
+    # Logging options
+    parser.add_argument("--log-file", type=str, default=None, help="Log file path (default: console only)")
+    parser.add_argument(
+        "--log-level",
         type=str,
-        default=os.path.join(os.path.dirname(os.getcwd()), 'results'),
-        help='Base directory to store test results (default: ../results)'
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging level (default: INFO)",
+    )
+
+    # Cleanup options
+    parser.add_argument("--cleanup", action="store_true", help="Delete VMs, VMIMs, and namespaces after test")
+    parser.add_argument("--cleanup-on-failure", action="store_true", help="Clean up resources even if tests fail")
+    parser.add_argument(
+        "--dry-run-cleanup", action="store_true", help="Show what would be deleted without actually deleting"
+    )
+    parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt for cleanup (use with caution)")
+    parser.add_argument("--skip-checks", action="store_true", help="Skip VM verifications before migration")
+    parser.add_argument(
+        "--save-results", action="store_true", help="Save detailed migration results (JSON and CSV) under results/."
     )
 
     parser.add_argument(
-        '--interleaved-scheduling',
-        action='store_true',
-        help='Distribute parallel migration threads in interleaved pattern across nodes. '
-             'Instead of sequential (1,2,3,...), distributes VMs evenly across nodes first. '
-             'Example: With 400 VMs and 5 nodes, processes VMs in order: 1,81,161,241,321,2,82,162,... '
-             'This ensures even load distribution across all nodes from the start, preventing '
-             'hotspots and improving overall migration performance.'
+        "--storage-version", type=str, default=None, help="Storage version to include in results path (optional)"
+    )
+
+    parser.add_argument(
+        "--results-folder",
+        type=str,
+        default=os.path.join(os.path.dirname(os.getcwd()), "results"),
+        help="Base directory to store test results (default: ../results)",
+    )
+
+    parser.add_argument(
+        "--interleaved-scheduling",
+        action="store_true",
+        help="Distribute parallel migration threads in interleaved pattern across nodes. "
+        "Instead of sequential (1,2,3,...), distributes VMs evenly across nodes first. "
+        "Example: With 400 VMs and 5 nodes, processes VMs in order: 1,81,161,241,321,2,82,162,... "
+        "This ensures even load distribution across all nodes from the start, preventing "
+        "hotspots and improving overall migration performance.",
     )
 
     return parser.parse_args()
@@ -224,13 +258,18 @@ def validate_migration_args(args, logger):
         logger.error("--auto-select-busiest can only be used with --evacuate")
         return False
 
-
     return True
 
 
-def create_vms_on_node(namespaces: List[str], vm_yaml: str, node_name: str,
-                       vm_name: str, logger, max_retries: int = 5,
-                       initial_delay: float = 2.0) -> Dict[str, bool]:
+def create_vms_on_node(
+    namespaces: List[str],
+    vm_yaml: str,
+    node_name: str,
+    vm_name: str,
+    logger,
+    max_retries: int = 5,
+    initial_delay: float = 2.0,
+) -> Dict[str, bool]:
     """
     Create VMs on a specific node with retry logic.
 
@@ -252,7 +291,6 @@ def create_vms_on_node(namespaces: List[str], vm_yaml: str, node_name: str,
     else:
         logger.info(f"\nCreating {len(namespaces)} VMs (no node selector)...")
 
-    from utils.common import add_node_selector_to_vm_yaml
     import subprocess
 
     results = {}
@@ -272,13 +310,16 @@ def create_vms_on_node(namespaces: List[str], vm_yaml: str, node_name: str,
                         break  # Don't retry YAML modification failures
                 else:
                     # Read the YAML file directly without node selector
-                    with open(vm_yaml, 'r') as f:
+                    with open(vm_yaml) as f:
                         modified_yaml = f.read()
 
                 # Create VM
                 result = subprocess.run(
                     f"kubectl create -f - -n {ns}",
-                    shell=True, input=modified_yaml.encode(), capture_output=True
+                    shell=True,
+                    input=modified_yaml.encode(),
+                    capture_output=True,
+                    check=False,
                 )
 
                 if result.returncode == 0:
@@ -291,13 +332,13 @@ def create_vms_on_node(namespaces: List[str], vm_yaml: str, node_name: str,
 
                     # Check if it's a retryable error (webhook timeout, internal error)
                     retryable_errors = [
-                        'context deadline exceeded',
-                        'webhook',
-                        'Internal error',
-                        'InternalError',
-                        'connection refused',
-                        'timeout',
-                        'temporarily unavailable'
+                        "context deadline exceeded",
+                        "webhook",
+                        "Internal error",
+                        "InternalError",
+                        "connection refused",
+                        "timeout",
+                        "temporarily unavailable",
                     ]
 
                     is_retryable = any(err in error_msg for err in retryable_errors)
@@ -336,8 +377,9 @@ def create_vms_on_node(namespaces: List[str], vm_yaml: str, node_name: str,
     return results
 
 
-def wait_for_vms_running(namespaces: List[str], vm_name: str, timeout: int, logger,
-                         poll_interval: int = 10) -> Dict[str, bool]:
+def wait_for_vms_running(
+    namespaces: List[str], vm_name: str, timeout: int, logger, poll_interval: int = 10
+) -> Dict[str, bool]:
     """
     Wait for all VMs to reach Running state with polling.
 
@@ -369,8 +411,16 @@ def wait_for_vms_running(namespaces: List[str], vm_name: str, timeout: int, logg
             if status == "Running":
                 logger.info(f"[{ns}] VM is now Running")
                 results[ns] = True
-            elif status in ["Provisioning", "Starting", "Stopped", "WaitingForVolumeBinding",
-                           "Scheduling", "Scheduled", "DataVolumeError", None]:
+            elif status in [
+                "Provisioning",
+                "Starting",
+                "Stopped",
+                "WaitingForVolumeBinding",
+                "Scheduling",
+                "Scheduled",
+                "DataVolumeError",
+                None,
+            ]:
                 # VM is still starting up - keep waiting
                 still_pending.add(ns)
             else:
@@ -383,10 +433,12 @@ def wait_for_vms_running(namespaces: List[str], vm_name: str, timeout: int, logg
         if pending:
             running_count = len(namespaces) - len(pending)
             remaining_time = timeout - elapsed
-            logger.info(f"VMs running: {running_count}/{len(namespaces)} | "
-                       f"Pending: {len(pending)} | "
-                       f"Elapsed: {elapsed:.0f}s | "
-                       f"Remaining: {remaining_time:.0f}s")
+            logger.info(
+                f"VMs running: {running_count}/{len(namespaces)} | "
+                f"Pending: {len(pending)} | "
+                f"Elapsed: {elapsed:.0f}s | "
+                f"Remaining: {remaining_time:.0f}s"
+            )
 
             # Log which VMs are still pending (only first few to avoid spam)
             if len(pending) <= 5:
@@ -420,7 +472,7 @@ def migrate_vm_sequential(
     poll_interval: int = 2,
     max_vmim_retries: int = 10,
     max_migration_retries: int = 3,
-    retry_delay: int = 2
+    retry_delay: int = 2,
 ) -> Tuple[str, bool, float, Optional[str], Optional[str], Optional[float]]:
     """
     Migrate a single VM and measure time.
@@ -505,10 +557,10 @@ def migrate_vm_sequential(
 def main():
     """Main function."""
     args = parse_arguments()
-    
+
     # Setup logging
     logger = setup_logging(args.log_file, args.log_level)
-    
+
     # Print configuration
     logger.info("=" * 80)
     logger.info("KubeVirt VM Live Migration Performance Test")
@@ -537,9 +589,9 @@ def main():
         logger.info(f"Source node: {args.source_node}")
     if args.target_node:
         logger.info(f"Target node: {args.target_node}")
-    
+
     logger.info("=" * 80)
-    
+
     # Validate arguments
     if not validate_migration_args(args, logger):
         sys.exit(1)
@@ -600,17 +652,16 @@ def main():
 
         # Create VMs
         if creation_node:
-            create_results = create_vms_on_node(namespaces, args.vm_template, creation_node, args.vm_name, logger)
+            _ = create_vms_on_node(namespaces, args.vm_template, creation_node, args.vm_name, logger)
         else:
             # For round-robin, create VMs without node selector
             logger.info("Creating VMs without node selector (will be distributed)")
-            create_results = create_vms_on_node(namespaces, args.vm_template, None, args.vm_name, logger)
+            _ = create_vms_on_node(namespaces, args.vm_template, None, args.vm_name, logger)
 
         # Wait for VMs to be running (default: 1 hour timeout)
         logger.info("\nWaiting for VMs to reach Running state...")
         running_results = wait_for_vms_running(
-            namespaces, args.vm_name, args.vm_startup_timeout, logger,
-            poll_interval=args.poll_interval
+            namespaces, args.vm_name, args.vm_startup_timeout, logger, poll_interval=args.poll_interval
         )
 
         successful_vms = sum(1 for success in running_results.values() if success)
@@ -699,21 +750,13 @@ def main():
     logger.info("Detecting disk count from existing VM spec...")
     try:
         sample_ns = f"{args.namespace_prefix}-{args.start}"
-        vm_yaml_cmd = [
-            "kubectl", "get", "vm", args.vm_name, "-n", sample_ns, "-o", "yaml"
-        ]
+        vm_yaml_cmd = ["kubectl", "get", "vm", args.vm_name, "-n", sample_ns, "-o", "yaml"]
         result = subprocess.run(vm_yaml_cmd, capture_output=True, text=True, check=False)
         if result.returncode == 0 and result.stdout:
             vm_spec = yaml.safe_load(result.stdout)
-            volumes = (
-                vm_spec.get("spec", {})
-                .get("template", {})
-                .get("spec", {})
-                .get("volumes", [])
-            )
+            volumes = vm_spec.get("spec", {}).get("template", {}).get("spec", {}).get("volumes", [])
             non_cloudinit = [
-                v for v in volumes
-                if not any(k in v for k in ["cloudInitNoCloud", "cloudInitConfigDrive"])
+                v for v in volumes if not any(k in v for k in ["cloudInitNoCloud", "cloudInitConfigDrive"])
             ]
             num_disks = len(non_cloudinit)
             logger.info(f"Detected {num_disks} disks (excluding cloud-init volumes)")
@@ -734,13 +777,19 @@ def main():
 
     # Scenario 1: Sequential Migration
     if not args.parallel and not args.evacuate and not args.round_robin:
-        logger.info(f"\nSequential migration from {args.source_node or 'auto-selected node'} to {args.target_node or 'auto-selected node'}")
+        logger.info(
+            f"\nSequential migration from {args.source_node or 'auto-selected node'} to {args.target_node or 'auto-selected node'}"
+        )
 
         for ns in namespaces:
             result = migrate_vm_sequential(
-                ns, args.vm_name, args.target_node, args.migration_timeout, logger,
+                ns,
+                args.vm_name,
+                args.target_node,
+                args.migration_timeout,
+                logger,
                 poll_interval=args.poll_interval,
-                max_migration_retries=args.max_migration_retries
+                max_migration_retries=args.max_migration_retries,
             )
             migration_results.append(result)
 
@@ -749,8 +798,10 @@ def main():
 
     # Scenario 2: Parallel Migration
     elif args.parallel and not args.evacuate and not args.round_robin:
-        logger.info(f"\nParallel migration from {args.source_node or 'auto-selected node'} "
-                    f"to {args.target_node or 'auto-selected node'}")
+        logger.info(
+            f"\nParallel migration from {args.source_node or 'auto-selected node'} "
+            f"to {args.target_node or 'auto-selected node'}"
+        )
         logger.info(f"Concurrency: {args.concurrency}")
 
         # Detect available nodes
@@ -772,8 +823,10 @@ def main():
                     reordered_namespaces.append(namespaces[i])
 
             logger.info(f"Detected {num_nodes} available nodes for interleaved scheduling")
-            logger.info(f"Reordered namespaces for interleaved scheduling (stride={group_size}). "
-                        f"First 10: {reordered_namespaces[:10]}")
+            logger.info(
+                f"Reordered namespaces for interleaved scheduling (stride={group_size}). "
+                f"First 10: {reordered_namespaces[:10]}"
+            )
         else:
             logger.info("Using default sequential namespace order for parallel scheduling")
 
@@ -789,8 +842,9 @@ def main():
                     logger,
                     args.poll_interval,
                     10,  # max_vmim_retries
-                    args.max_migration_retries
-                ): ns for ns in reordered_namespaces
+                    args.max_migration_retries,
+                ): ns
+                for ns in reordered_namespaces
             }
 
             for future in as_completed(futures):
@@ -856,9 +910,15 @@ def main():
         with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
             futures = {
                 executor.submit(
-                    migrate_vm_sequential, ns, args.vm_name, None,
-                    args.migration_timeout, logger, args.poll_interval,
-                    10, args.max_migration_retries
+                    migrate_vm_sequential,
+                    ns,
+                    args.vm_name,
+                    None,
+                    args.migration_timeout,
+                    logger,
+                    args.poll_interval,
+                    10,
+                    args.max_migration_retries,
                 ): ns
                 for ns in vms_to_evacuate  # Only migrate VMs on source node
             }
@@ -902,9 +962,15 @@ def main():
                     target = None
 
                 future = executor.submit(
-                    migrate_vm_sequential, ns, args.vm_name, target,
-                    args.migration_timeout, logger, args.poll_interval,
-                    10, args.max_migration_retries
+                    migrate_vm_sequential,
+                    ns,
+                    args.vm_name,
+                    target,
+                    args.migration_timeout,
+                    logger,
+                    args.poll_interval,
+                    10,
+                    args.max_migration_retries,
                 )
                 futures[future] = ns
 
@@ -961,10 +1027,12 @@ def main():
             if pending:
                 successful_count = sum(1 for v in ping_results.values() if v)
                 remaining_time = args.ping_timeout - elapsed
-                logger.info(f"Ping status: {successful_count}/{len(namespaces)} successful | "
-                           f"Pending: {len(pending)} | "
-                           f"Elapsed: {elapsed:.0f}s | "
-                           f"Remaining: {remaining_time:.0f}s")
+                logger.info(
+                    f"Ping status: {successful_count}/{len(namespaces)} successful | "
+                    f"Pending: {len(pending)} | "
+                    f"Elapsed: {elapsed:.0f}s | "
+                    f"Remaining: {remaining_time:.0f}s"
+                )
                 time.sleep(poll_interval)
 
         # Final status for any remaining pending VMs
@@ -986,25 +1054,31 @@ def main():
     table_data = []
     for ns, success, observed_duration, source, target, vmim_duration in migration_results:
         status = "Success" if success else "Failed"
-        table_data.append({
-            'namespace': ns,
-            'source_node': source or 'Unknown',
-            'target_node': target or 'Unknown',
-            'observed_duration': f"{observed_duration:.2f}s" if success else "N/A",
-            'vmim_duration': f"{vmim_duration:.2f}s" if (success and vmim_duration) else "N/A",
-            'status': status
-        })
+        table_data.append(
+            {
+                "namespace": ns,
+                "source_node": source or "Unknown",
+                "target_node": target or "Unknown",
+                "observed_duration": f"{observed_duration:.2f}s" if success else "N/A",
+                "vmim_duration": f"{vmim_duration:.2f}s" if (success and vmim_duration) else "N/A",
+                "status": status,
+            }
+        )
 
     # Print table
     if table_data:
         logger.info(f"Total migration time for {len(migration_results)} VMs: {total_migration_time:.2f}s")
         logger.info("\n" + "=" * 150)
-        logger.info(f"{'Namespace':<25} {'Source Node':<30} {'Target Node':<30} {'Observed Time':<15} {'VMIM Time':<15} {'Status':<10}")
+        logger.info(
+            f"{'Namespace':<25} {'Source Node':<30} {'Target Node':<30} {'Observed Time':<15} {'VMIM Time':<15} {'Status':<10}"
+        )
         logger.info("=" * 150)
 
         for row in table_data:
-            logger.info(f"{row['namespace']:<25} {row['source_node']:<30} {row['target_node']:<30} "
-                  f"{row['observed_duration']:<15} {row['vmim_duration']:<15} {row['status']:<10}")
+            logger.info(
+                f"{row['namespace']:<25} {row['source_node']:<30} {row['target_node']:<30} "
+                f"{row['observed_duration']:<15} {row['vmim_duration']:<15} {row['status']:<10}"
+            )
 
         logger.info("=" * 150)
 
@@ -1014,14 +1088,19 @@ def main():
 
     if successful_migrations > 0:
         # Observed durations (node change detection)
-        observed_durations = [observed_duration for _, success, observed_duration, _, _, _ in migration_results if success]
+        observed_durations = [
+            observed_duration for _, success, observed_duration, _, _, _ in migration_results if success
+        ]
         avg_observed = sum(observed_durations) / len(observed_durations)
         min_observed = min(observed_durations)
         max_observed = max(observed_durations)
 
         # VMIM durations (official KubeVirt timestamps)
-        vmim_durations = [vmim_duration for _, success, _, _, _, vmim_duration in migration_results
-                         if success and vmim_duration is not None]
+        vmim_durations = [
+            vmim_duration
+            for _, success, _, _, _, vmim_duration in migration_results
+            if success and vmim_duration is not None
+        ]
 
         logger.info("\n" + "=" * 80)
         logger.info("MIGRATION STATISTICS")
@@ -1030,7 +1109,7 @@ def main():
         logger.info(f"  Successful Migrations:  {successful_migrations}")
         logger.info(f"  Failed Migrations:      {failed_migrations}")
 
-        logger.info(f"\n  Observed Time (Node Change Detection):")
+        logger.info("\n  Observed Time (Node Change Detection):")
         logger.info(f"    Average:              {avg_observed:.2f}s")
         logger.info(f"    Minimum:              {min_observed:.2f}s")
         logger.info(f"    Maximum:              {max_observed:.2f}s")
@@ -1040,18 +1119,18 @@ def main():
             min_vmim = min(vmim_durations)
             max_vmim = max(vmim_durations)
 
-            logger.info(f"\n  VMIM Time (Official KubeVirt Timestamps):")
+            logger.info("\n  VMIM Time (Official KubeVirt Timestamps):")
             logger.info(f"    Average:              {avg_vmim:.2f}s")
             logger.info(f"    Minimum:              {min_vmim:.2f}s")
             logger.info(f"    Maximum:              {max_vmim:.2f}s")
 
             # Calculate difference
             avg_diff = avg_observed - avg_vmim
-            logger.info(f"\n  Difference (Observed - VMIM):")
+            logger.info("\n  Difference (Observed - VMIM):")
             logger.info(f"    Average:              {avg_diff:.2f}s")
-            logger.info(f"    Note: Difference includes polling overhead (~2s) and status update delays")
+            logger.info("    Note: Difference includes polling overhead (~2s) and status update delays")
         else:
-            logger.info(f"\n  VMIM Time: Not available (timestamps not found)")
+            logger.info("\n  VMIM Time: Not available (timestamps not found)")
 
         logger.info("=" * 80)
 
@@ -1062,34 +1141,22 @@ def main():
 
         if args.storage_version:
             out_dir = os.path.join(
-                args.results_folder,
-                args.storage_version,
-                f"{num_disks}-disk",
-                f"{timestamp}_live_migration_{suffix}"
+                args.results_folder, args.storage_version, f"{num_disks}-disk", f"{timestamp}_live_migration_{suffix}"
             )
         else:
-            out_dir = os.path.join(
-                args.results_folder,
-                f"{num_disks}-disk",
-                f"{timestamp}_live_migration_{suffix}"
-            )
+            out_dir = os.path.join(args.results_folder, f"{num_disks}-disk", f"{timestamp}_live_migration_{suffix}")
         os.makedirs(out_dir, exist_ok=True)
 
         logger.info(f"Created results directory: {out_dir}")
 
         # Save detailed and summary results in the correct folder
         save_migration_results(
-            args,
-            migration_results,
-            base_dir=out_dir,
-            logger=logger,
-            total_time=total_migration_time
+            args, migration_results, base_dir=out_dir, logger=logger, total_time=total_migration_time
         )
 
         logger.info(f"Migration results saved under: {out_dir}")
     else:
         logger.info("Migration results not saved (use --save-results to enable).")
-
 
     # Determine if cleanup should run
     should_cleanup = args.cleanup or (args.cleanup_on_failure and failed_migrations > 0)
@@ -1111,15 +1178,16 @@ def main():
                 logger.info("Cleaning up VirtualMachineInstanceMigration objects...")
                 vmim_count = 0
                 for ns in namespaces:
-                    vmims = list_resources_in_namespace(ns, 'virtualmachineinstancemigration', logger)
+                    vmims = list_resources_in_namespace(ns, "virtualmachineinstancemigration", logger)
                     for vmim in vmims:
                         if args.dry_run_cleanup:
                             logger.info(f"[DRY RUN] Would delete VMIM: {vmim} in {ns}")
-                        else:
-                            if delete_vmim(vmim, ns, logger):
-                                vmim_count += 1
+                        elif delete_vmim(vmim, ns, logger):
+                            vmim_count += 1
 
-                logger.info(f"{'[DRY RUN] Would delete' if args.dry_run_cleanup else 'Deleted'} {vmim_count} VMIM objects")
+                logger.info(
+                    f"{'[DRY RUN] Would delete' if args.dry_run_cleanup else 'Deleted'} {vmim_count} VMIM objects"
+                )
 
                 # Clean up VMs and namespaces if they were created by this test
                 if args.create_vms:
@@ -1131,7 +1199,7 @@ def main():
                         delete_namespaces=True,
                         dry_run=args.dry_run_cleanup,
                         batch_size=args.concurrency,
-                        logger=logger
+                        logger=logger,
                     )
                     print_cleanup_summary(stats, logger)
                 else:
@@ -1148,6 +1216,5 @@ def main():
     logger.info("\nMigration test complete!")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
-

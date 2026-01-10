@@ -1,17 +1,17 @@
 #!/bin/bash
-"""
-Remove node selectors from VMs to allow rescheduling during FAR tests.
-
-This script patches all VMs in the specified namespace range to remove
-nodeSelector constraints, allowing them to be rescheduled to any node
-during failure recovery.
-
-Usage:
-    ./patch-vms.sh --namespace-prefix kubevirt-perf-test --start 1 --end 60
-
-Author: KubeVirt Benchmark Suite Contributors
-License: Apache 2.0
-"""
+#
+# Remove node selectors from VMs to allow rescheduling during FAR tests.
+#
+# This script patches all VMs in the specified namespace range to remove
+# nodeSelector constraints, allowing them to be rescheduled to any node
+# during failure recovery.
+#
+# Usage:
+#     ./patch-vms.sh --namespace-prefix kubevirt-perf-test --start 1 --end 60
+#
+# Author: KubeVirt Benchmark Suite Contributors
+# License: Apache 2.0
+#
 
 set -euo pipefail
 
@@ -141,18 +141,18 @@ fi
 patch_vm() {
     local namespace=$1
     local vm_name=$2
-    
+
     if [[ "$DRY_RUN" == "true" ]]; then
         echo "[DRY RUN] Would patch VM $vm_name in namespace $namespace"
         return 0
     fi
-    
+
     # Check if nodeSelector exists
     if ! kubectl get vm "$vm_name" -n "$namespace" -o jsonpath='{.spec.template.spec.nodeSelector}' 2>/dev/null | grep -q .; then
         log_info "[$namespace/$vm_name] No nodeSelector found, skipping"
         return 0
     fi
-    
+
     # Patch to remove nodeSelector
     if kubectl patch vm "$vm_name" -n "$namespace" --type=json \
         -p '[{"op":"remove","path":"/spec/template/spec/nodeSelector"}]' 2>/dev/null; then
@@ -177,16 +177,16 @@ log_info "Discovering VMs in namespaces ${NAMESPACE_PREFIX}-${START} to ${NAMESP
 VM_LIST=()
 for i in $(seq "$START" "$END"); do
     namespace="${NAMESPACE_PREFIX}-${i}"
-    
+
     # Check if namespace exists
     if ! kubectl get namespace "$namespace" &> /dev/null; then
         log_warning "Namespace $namespace does not exist, skipping"
         continue
     fi
-    
+
     # Get VMs in this namespace
     vms=$(kubectl get vm -n "$namespace" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
-    
+
     if [[ -n "$vms" ]]; then
         for vm in $vms; do
             VM_LIST+=("$namespace:$vm")
@@ -220,7 +220,7 @@ FAIL_COUNT=0
 for vm_entry in "${VM_LIST[@]}"; do
     namespace="${vm_entry%%:*}"
     vm_name="${vm_entry##*:}"
-    
+
     # Run in background with job control
     (
         if patch_vm "$namespace" "$vm_name"; then
@@ -229,7 +229,7 @@ for vm_entry in "${VM_LIST[@]}"; do
             exit 1
         fi
     ) &
-    
+
     # Limit parallel jobs
     while [[ $(jobs -r | wc -l) -ge $PARALLEL_JOBS ]]; do
         sleep 0.1
@@ -250,4 +250,3 @@ echo ""
 
 log_success "VM patching completed"
 exit 0
-
