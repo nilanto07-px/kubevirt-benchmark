@@ -19,14 +19,19 @@ The script validates:
 
 ## Running Validation
 
-### Using virtbench CLI
-
 ```bash
 # Basic validation
 virtbench validate-cluster --storage-class YOUR-STORAGE-CLASS
 
+# Quick validation (skip slower checks)
+virtbench validate-cluster --storage-class YOUR-STORAGE-CLASS --quick
+
+# Use a specific kubeconfig
+virtbench --kubeconfig /path/to/kubeconfig validate-cluster \
+  --storage-class YOUR-STORAGE-CLASS
+
 # Comprehensive validation
-virtbench validate-cluster --storage-class YOUR-STORAGE-CLASS --all
+virtbench validate-cluster --all --storage-class YOUR-STORAGE-CLASS
 
 # With custom DataSource
 virtbench validate-cluster \
@@ -40,34 +45,19 @@ virtbench validate-cluster \
   --min-worker-nodes 5
 ```
 
-### Using Python Script
-
-```bash
-cd utils
-
-# Basic validation
-python3 validate_cluster.py --storage-class YOUR-STORAGE-CLASS
-
-# Comprehensive validation
-python3 validate_cluster.py --all --storage-class YOUR-STORAGE-CLASS
-
-# With custom DataSource
-python3 validate_cluster.py \
-  --storage-class YOUR-STORAGE-CLASS \
-  --datasource debian \
-  --datasource-namespace openshift-virtualization-os-images
-```
-
 ## Validation Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--storage-class NAME` | Storage class name to validate | (required) |
+| `--quick` | Skip DataSource, SSH pod, and node resource checks | false |
 | `--datasource NAME` | DataSource name to validate | rhel9 |
 | `--datasource-namespace NS` | DataSource namespace | openshift-virtualization-os-images |
+| `--ssh-pod NAME` | SSH pod name to validate | ssh-test-pod |
+| `--ssh-pod-namespace NS` | SSH pod namespace | default |
 | `--min-worker-nodes NUM` | Minimum worker nodes required | 1 |
 | `--all` | Run all validation checks | false |
-| `--log-level LEVEL` | Logging level | INFO |
+| `--kubeconfig PATH` | Global `virtbench` option for kubeconfig path | `KUBECONFIG` environment variable or kubectl default |
 
 ## Exit Codes
 
@@ -198,4 +188,3 @@ Before running benchmarks, ensure:
 - [Installation Guide](../../../install.md) - Install virtbench and dependencies
 - [Configuration Options](../configuration.md) - Configure storage and templates
 - [User Guide Overview](overview.md) - Start running benchmarks
-

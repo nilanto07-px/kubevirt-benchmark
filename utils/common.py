@@ -8,6 +8,7 @@ kubectl command execution, and common helper functions.
 
 import json
 import logging
+import shlex
 import subprocess
 import sys
 import time
@@ -18,6 +19,15 @@ import csv
 
 # Minimum required Python version
 MIN_PYTHON_VERSION = (3, 8)
+
+SENSITIVE_ARG_KEYWORDS = (
+    'password',
+    'passwd',
+    'token',
+    'api-key',
+    'apikey',
+    'pwd',
+)
 
 
 class Colors:
@@ -75,49 +85,97 @@ def require_python_version():
         sys.exit(1)
 
 
+def _is_sensitive_arg(arg: str) -> bool:
+    key = arg.lstrip('-').split('=', 1)[0].lower()
+    return any(keyword in key for keyword in SENSITIVE_ARG_KEYWORDS)
+
+
+def redact_command_args(args: List[str]) -> List[str]:
+    """Redact sensitive command-line argument values before logging."""
+    redacted = []
+    redact_next = False
+    for arg in args:
+        if redact_next:
+            redacted.append('***')
+            redact_next = False
+            continue
+
+        if arg.startswith('--') and '=' in arg:
+            key, _ = arg.split('=', 1)
+            if _is_sensitive_arg(key):
+                redacted.append(f"{key}=***")
+            else:
+                redacted.append(arg)
+            continue
+
+        redacted.append(arg)
+        if arg.startswith('--') and _is_sensitive_arg(arg):
+            redact_next = True
+
+    return redacted
+
+
+def get_command_for_logging() -> str:
+    """Return the virtbench command, or direct Python argv, with secrets redacted."""
+    raw_args = None
+    env_args = os.getenv('VIRTBENCH_COMMAND_ARGS')
+    if env_args:
+        try:
+            loaded = json.loads(env_args)
+            if isinstance(loaded, list) and all(isinstance(item, str) for item in loaded):
+                raw_args = loaded
+        except json.JSONDecodeError:
+            raw_args = None
+
+    if raw_args is None:
+        raw_args = sys.argv
+
+    return shlex.join(redact_command_args(raw_args))
+
+
 def setup_logging(log_file: Optional[str] = None, log_level: str = 'INFO') -> logging.Logger:
     """
     Configure logging for the test suite.
-    
+
     Args:
         log_file: Optional file path to write logs to
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
-    
+
     Returns:
         Configured logger instance
     """
     logger = logging.getLogger('kubevirt-perf')
     logger.setLevel(getattr(logging, log_level.upper()))
-    
+
     # Clear any existing handlers
     logger.handlers.clear()
-    
+
     # Create formatter
     formatter = logging.Formatter(
         '%(asctime)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
-    
+
     # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(getattr(logging, log_level.upper()))
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
-    if not log_file:
-        log_file = f"kubevirt-perf-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
-    
-    # File handler if specified
     if log_file:
         try:
+            log_dir = os.path.dirname(log_file)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
             file_handler = logging.FileHandler(log_file)
             file_handler.setLevel(logging.DEBUG)  # Always log everything to file
             file_handler.setFormatter(formatter)
             logger.addHandler(file_handler)
             logger.info(f"Logging to file: {log_file}")
+            logger.info(f"Command: {get_command_for_logging()}")
         except Exception as e:
             logger.error(f"Failed to create log file {log_file}: {e}")
-    
+
     return logger
 
 
@@ -130,26 +188,26 @@ def run_kubectl_command(
 ) -> Tuple[int, str, str]:
     """
     Execute a kubectl command with error handling.
-    
+
     Args:
         args: List of command arguments (e.g., ['get', 'pods'])
         check: Raise exception on non-zero exit code
         capture_output: Capture stdout and stderr
         timeout: Command timeout in seconds
         logger: Logger instance for debug output
-    
+
     Returns:
         Tuple of (return_code, stdout, stderr)
-    
+
     Raises:
         subprocess.CalledProcessError: If check=True and command fails
         subprocess.TimeoutExpired: If command exceeds timeout
     """
     cmd = ['kubectl'] + args
-    
+
     if logger:
         logger.debug(f"Executing: {' '.join(cmd)}")
-    
+
     try:
         result = subprocess.run(
             cmd,
@@ -176,11 +234,11 @@ def run_kubectl_command(
 def namespace_exists(namespace: str, logger: Optional[logging.Logger] = None) -> bool:
     """
     Check if a namespace exists.
-    
+
     Args:
         namespace: Namespace name
         logger: Logger instance
-    
+
     Returns:
         True if namespace exists, False otherwise
     """
@@ -761,12 +819,12 @@ CLEANUP SUMMARY
 def get_vm_status(vm_name: str, namespace: str, logger: Optional[logging.Logger] = None) -> Optional[str]:
     """
     Get the status of a VM.
-    
+
     Args:
         vm_name: VM name
         namespace: Namespace
         logger: Logger instance
-    
+
     Returns:
         VM status string or None if not found
     """
@@ -788,12 +846,12 @@ def get_vm_status(vm_name: str, namespace: str, logger: Optional[logging.Logger]
 def get_vmi_ip(vmi_name: str, namespace: str, logger: Optional[logging.Logger] = None) -> Optional[str]:
     """
     Get the IP address of a VMI.
-    
+
     Args:
         vmi_name: VMI name
         namespace: Namespace
         logger: Logger instance
-    
+
     Returns:
         IP address or None if not available
     """
@@ -810,6 +868,108 @@ def get_vmi_ip(vmi_name: str, namespace: str, logger: Optional[logging.Logger] =
         if logger:
             logger.debug(f"Error getting VMI IP for {vmi_name} in {namespace}: {e}")
         return None
+
+
+def get_vm_disk_count(vm_name: str, namespace: str,
+                      logger: Optional[logging.Logger] = None) -> int:
+    """
+    Get the number of data disks on a VM from the VM spec.
+
+    Counts volumes defined in spec.template.spec.volumes, excluding cloudInit
+    volumes (cloudInitNoCloud, cloudInitConfigDrive).
+
+    Args:
+        vm_name: VM name
+        namespace: Namespace
+        logger: Logger instance
+
+    Returns:
+        Count of non-cloud-init volumes, or 0 if detection fails
+    """
+    try:
+        returncode, stdout, stderr = run_kubectl_command(
+            ['get', 'vm', vm_name, '-n', namespace,
+             '-o', 'jsonpath={.spec.template.spec.volumes}'],
+            check=False,
+            logger=logger
+        )
+        if returncode == 0 and stdout.strip():
+            volumes = json.loads(stdout.strip())
+            non_cloudinit_volumes = [
+                v for v in volumes
+                if not any(k in v for k in ['cloudInitNoCloud', 'cloudInitConfigDrive'])
+            ]
+            if logger:
+                logger.debug(f"Detected {len(non_cloudinit_volumes)} disks from VM spec (excluding cloud-init)")
+            return len(non_cloudinit_volumes)
+    except Exception as e:
+        if logger:
+            logger.debug(f"Could not get VM disk count for {vm_name} in {namespace}: {e}")
+    return 0
+
+
+def get_pvc_status(namespace: str, logger: Optional[logging.Logger] = None) -> str:
+    """
+    Get a one-line summary of PVC phases in a namespace.
+
+    Args:
+        namespace: Namespace
+        logger: Logger instance
+
+    Returns:
+        Space-separated 'name=phase' string, 'No PVCs', or 'Error'
+    """
+    try:
+        returncode, stdout, _ = run_kubectl_command(
+            ['get', 'pvc', '-n', namespace,
+             '-o', 'jsonpath={range .items[*]}{.metadata.name}={.status.phase} {end}'],
+            check=False,
+            logger=logger
+        )
+        if returncode == 0:
+            return stdout.strip() or "No PVCs"
+        return "Error"
+    except Exception as e:
+        if logger:
+            logger.debug(f"Error getting PVC status for {namespace}: {e}")
+        return "Error"
+
+
+def ssh_exec_command(ip: str, command: str, ssh_pod: str, ssh_pod_ns: str,
+                     vm_user: str, vm_password: str,
+                     logger: Optional[logging.Logger] = None,
+                     timeout: int = 30) -> Tuple[int, str, str]:
+    """
+    Execute a command on a VM via SSH through an existing helper pod.
+
+    Uses sshpass for password authentication. Disables strict host-key checking
+    and pubkey auth so it works against freshly-deployed VMs.
+
+    Args:
+        ip: VM IP address
+        command: Shell command to run on the VM
+        ssh_pod: SSH helper pod name
+        ssh_pod_ns: SSH helper pod namespace
+        vm_user: VM SSH user
+        vm_password: VM SSH password
+        logger: Logger instance
+        timeout: Command timeout in seconds
+
+    Returns:
+        Tuple of (return_code, stdout, stderr)
+    """
+    ssh_cmd = (
+        f"sshpass -p '{vm_password}' ssh -o StrictHostKeyChecking=no "
+        f"-o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 "
+        f"-o PreferredAuthentications=password -o PubkeyAuthentication=no "
+        f"{vm_user}@{ip} '{command}'"
+    )
+    return run_kubectl_command(
+        ['exec', '-n', ssh_pod_ns, ssh_pod, '--', 'sh', '-c', ssh_cmd],
+        check=False,
+        timeout=timeout,
+        logger=logger
+    )
 
 
 def ping_vm(ip: str, ssh_pod: str, ssh_pod_ns: str, logger: Optional[logging.Logger] = None) -> bool:
@@ -1977,12 +2137,12 @@ def save_migration_results(args, results, base_dir="results", logger=None, total
     return json_path, csv_path, summary_json_path, summary_csv_path, output_dir
 
 
-def save_capacity_results(results: dict, base_dir: str = "results", storage_version: str = None, logger=None) -> str:
+def save_capacity_results(results: dict, base_dir: str = "results", storage_driver: str = None, logger=None) -> str:
     """
     Save chaos benchmark results to JSON and CSV files.
 
     Directory structure follows the same pattern as other tests:
-        results/{storage_version}/{num_disks}-disk/{timestamp}_chaos_benchmark_{total_vms}vms/
+        results/{storage_driver}/{num_disks}-disk/{timestamp}_chaos_benchmark_{total_vms}vms/
 
     Args:
         results: Dictionary containing chaos benchmark results with keys:
@@ -2000,7 +2160,7 @@ def save_capacity_results(results: dict, base_dir: str = "results", storage_vers
             - end_reason: Reason for test ending
             - phases_skipped: List of skipped phases
         base_dir: Base directory for results (default: "results")
-        storage_version: Storage version for folder hierarchy (e.g., "3.2.0"). If None, uses "default"
+        storage_driver: Storage driver for folder hierarchy (e.g., "portworx-3.6"). If None, uses "default"
         logger: Logger instance (optional)
 
     Returns:
@@ -2009,7 +2169,7 @@ def save_capacity_results(results: dict, base_dir: str = "results", storage_vers
     from datetime import datetime
 
     # Create timestamped output directory following the standard structure:
-    # results/{storage_version}/{num_disks}-disk/{timestamp}_chaos_benchmark_{total_vms}vms/
+    # results/{storage_driver}/{num_disks}-disk/{timestamp}_chaos_benchmark_{total_vms}vms/
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     total_vms = results.get('total_vms', 0)
 
@@ -2018,11 +2178,11 @@ def save_capacity_results(results: dict, base_dir: str = "results", storage_vers
     num_disks = data_volumes_per_vm + 1  # +1 for root volume
 
     # Build directory path
-    version_dir = storage_version if storage_version else "default"
+    driver_dir = storage_driver if storage_driver else "default"
     disk_dir = f"{num_disks}-disk"
     run_dir = f"{timestamp}_chaos_benchmark_{total_vms}vms"
 
-    output_dir = os.path.join(base_dir, version_dir, disk_dir, run_dir)
+    output_dir = os.path.join(base_dir, driver_dir, disk_dir, run_dir)
     os.makedirs(output_dir, exist_ok=True)
 
     if logger:
@@ -2591,4 +2751,3 @@ def get_vm_volume_names(vm_name: str, namespace: str,
         if logger:
             logger.error(f"[{namespace}] Failed to get VM volumes: {e}")
         return []
-

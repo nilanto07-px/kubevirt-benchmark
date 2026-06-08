@@ -5,6 +5,9 @@ virtbench - KubeVirt Benchmark Suite CLI
 Main entry point for the virtbench command-line interface.
 """
 import click
+import json
+import os
+import sys
 from pathlib import Path
 
 from virtbench.common import find_repo_root
@@ -14,8 +17,10 @@ from virtbench.commands import (
     chaos,
     failure_recovery,
     fio,
+    elbencho,
     validate,
     version,
+    vm_ops,
 )
 
 
@@ -40,7 +45,7 @@ class Context:
 
 
 @click.group(context_settings={'help_option_names': ['-h', '--help']})
-@click.version_option(version='1.0.0', prog_name='virtbench')
+@click.version_option(version='2.0.0', prog_name='virtbench')
 @click.option('--log-level',
               default='info',
               type=click.Choice(['debug', 'info', 'warn', 'error'], case_sensitive=False),
@@ -70,9 +75,12 @@ def cli(ctx, log_level, log_file, kubeconfig, timeout, uuid):
       migration            Run VM migration benchmark
       chaos-benchmark      Run chaos benchmark (concurrent VM/volume operations)
       failure-recovery     Run failure recovery benchmark
+      fio                  Run FIO benchmark across VMs
+      elbencho             Manage elbencho workloads on VMs
+      vm-ops               VM operations (drain, rebalance, snapshot, blkdiscard, power)
       validate-cluster     Validate cluster prerequisites
       version              Print version information
-    
+
     \b
     Examples:
       # Validate cluster
@@ -83,6 +91,9 @@ def cli(ctx, log_level, log_file, kubeconfig, timeout, uuid):
 
       # Run migration test
       virtbench migration --start 1 --end 5 --source-node worker-1
+
+      # Manage elbencho workloads
+      virtbench elbencho -p datasource-clone -s 1 -e 10 -n rhel-elbencho-1 -a status
     
     \b
     Global Flags:
@@ -99,6 +110,11 @@ def cli(ctx, log_level, log_file, kubeconfig, timeout, uuid):
     ctx.obj.kubeconfig = kubeconfig
     ctx.obj.timeout = timeout
     ctx.obj.uuid = uuid
+
+    if kubeconfig:
+        os.environ['KUBECONFIG'] = kubeconfig
+
+    os.environ['VIRTBENCH_COMMAND_ARGS'] = json.dumps(['virtbench'] + sys.argv[1:])
     
     # Initialize context (find repo root)
     ctx.obj.initialize()
@@ -110,6 +126,8 @@ cli.add_command(migration.migration)
 cli.add_command(chaos.chaos_benchmark)
 cli.add_command(failure_recovery.failure_recovery)
 cli.add_command(fio.fio)
+cli.add_command(elbencho.elbencho)
+cli.add_command(vm_ops.vm_ops)
 cli.add_command(validate.validate_cluster)
 cli.add_command(version.version)
 
@@ -121,4 +139,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

@@ -40,6 +40,10 @@ console = Console()
               help='Skip namespace creation (use existing namespaces)')
 @click.option('--boot-storm', is_flag=True,
               help='After initial test, shutdown all VMs and test boot storm')
+@click.option('--skip-vm-creation', is_flag=True,
+              help='Skip VM creation phase (use with --boot-storm to test existing VMs)')
+@click.option('--num-disks', type=int, default=None,
+              help='Number of disks per VM (auto-detected from template or existing VM if not specified)')
 @click.option('--namespace-batch-size', default=20, type=int,
               help='Number of namespaces to create in parallel')
 @click.option('--single-node', is_flag=True, help='Run all VMs on a single node')
@@ -48,7 +52,7 @@ console = Console()
               help='Save detailed results (JSON and CSV) to results folder')
 @click.option('--results-folder', default='results',
               help='Base directory to store test results')
-@click.option('--storage-version', help='Storage version to include in results path (optional)')
+@click.option('--storage-driver', help='Storage driver label for results path (for example: portworx-3.6, ceph)')
 @click.option('--log-file', type=click.Path(), help='Log file path (auto-generated if not specified)')
 @click.pass_context
 def datasource_clone(ctx, **kwargs):
@@ -146,6 +150,8 @@ def datasource_clone(ctx, **kwargs):
         python_args['skip-namespace-creation'] = True
     if kwargs['boot_storm']:
         python_args['boot-storm'] = True
+    if kwargs['skip_vm_creation']:
+        python_args['skip-vm-creation'] = True
     if kwargs['single_node']:
         python_args['single-node'] = True
     if kwargs['save_results']:
@@ -154,17 +160,20 @@ def datasource_clone(ctx, **kwargs):
     # Add optional args
     if kwargs.get('node_name'):
         python_args['node-name'] = kwargs['node_name']
-    if kwargs.get('storage_version'):
-        python_args['storage-version'] = kwargs['storage_version']
+    if kwargs.get('storage_driver'):
+        python_args['storage-driver'] = kwargs['storage_driver']
+    if kwargs.get('num_disks'):
+        python_args['num-disks'] = kwargs['num_disks']
     if secret_yaml_path:
         python_args['secret-yaml'] = str(secret_yaml_path)
 
-    # Add log-file (prefer subcommand option, then global context, then auto-generate)
+    # Add log-file only when explicitly requested. With --save-results, the
+    # script creates the run directory first and writes the log next to JSON/CSV.
     if kwargs.get('log_file'):
         python_args['log-file'] = kwargs['log_file']
     elif ctx.obj.log_file:
         python_args['log-file'] = ctx.obj.log_file
-    else:
+    elif not kwargs['save_results']:
         python_args['log-file'] = generate_log_filename('datasource-clone')
     
     # Build and run command
@@ -182,4 +191,3 @@ def datasource_clone(ctx, **kwargs):
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         sys.exit(1)
-

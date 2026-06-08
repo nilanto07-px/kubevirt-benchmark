@@ -15,15 +15,13 @@ console = Console()
 
 
 @click.command('failure-recovery')
-@click.option('--start', '-s', default=1, type=int, help='Start index for test namespaces')
-@click.option('--end', '-e', default=5, type=int, help='End index for test namespaces')
+@click.option('--node', required=True, help='Node name to auto-detect VMs from')
 @click.option('--vm-name', '-n', default='rhel-9-vm', help='VM resource name')
 @click.option('--vm-template',
               default='examples/vm-templates/rhel9-vm-datasource.yaml',
               help='Path to VM template YAML')
 @click.option('--storage-class', help='Storage class name (overrides template value)')
 @click.option('--namespace-prefix', default='failure-recovery', help='Namespace prefix')
-@click.option('--node-name', help='Node name to simulate failure on')
 @click.option('--concurrency', '-c', default=10, type=int, help='Max parallel threads')
 @click.option('--poll-interval', default=5, type=int, help='Seconds between status checks')
 @click.option('--recovery-timeout', default=600, type=int, help='Timeout for recovery in seconds')
@@ -31,7 +29,7 @@ console = Console()
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompts')
 @click.option('--save-results', is_flag=True, help='Save detailed results to results folder')
 @click.option('--results-folder', default='../results', help='Base directory to store test results')
-@click.option('--storage-version', help='Storage version to include in results path (optional)')
+@click.option('--storage-driver', help='Storage driver label for results path (for example: portworx-3.6, ceph)')
 @click.option('--log-file', type=click.Path(), help='Log file path (auto-generated if not specified)')
 @click.pass_context
 def failure_recovery(ctx, **kwargs):
@@ -39,17 +37,15 @@ def failure_recovery(ctx, **kwargs):
     Run failure recovery benchmark
 
     This workload tests VM recovery time after simulated node failures.
+    VMs are auto-detected on the specified node.
 
     \b
     Examples:
-      # Run failure recovery test
-      virtbench failure-recovery --start 1 --end 5 --storage-class YOUR-STORAGE-CLASS
-
-      # Test on specific node
-      virtbench failure-recovery --start 1 --end 5 --node-name worker-1
+      # Auto-detect VMs on a node and monitor recovery
+      virtbench failure-recovery --node worker-1 --vm-name rhel-9-vm
 
       # Run with cleanup
-      virtbench failure-recovery --start 1 --end 5 --cleanup
+      virtbench failure-recovery --node worker-1 --cleanup
     """
     print_banner("Failure Recovery Benchmark")
     
@@ -75,16 +71,16 @@ def failure_recovery(ctx, **kwargs):
             sys.exit(1)
     
     # Build Python script command
-    script_path = repo_root / 'failure-recovery' / 'measure-recovery-time.py'
-    
+    script_path = repo_root / 'failure-recovery' / 'recovery-test.py'
+
     if not script_path.exists():
         console.print(f"[red]Error: Script not found: {script_path}[/red]")
         sys.exit(1)
-    
+
     # Map CLI args to Python script args
     python_args = {
-        'start': kwargs['start'],
-        'end': kwargs['end'],
+        'mode': 'monitor',
+        'node': kwargs['node'],
         'vm-name': kwargs['vm_name'],
         'vm-template': str(template_path),
         'namespace-prefix': kwargs['namespace_prefix'],
@@ -103,11 +99,8 @@ def failure_recovery(ctx, **kwargs):
     if kwargs['save_results']:
         python_args['save-results'] = True
 
-    # Add optional args
-    if kwargs.get('node_name'):
-        python_args['node-name'] = kwargs['node_name']
-    if kwargs.get('storage_version'):
-        python_args['storage-version'] = kwargs['storage_version']
+    if kwargs.get('storage_driver'):
+        python_args['storage-driver'] = kwargs['storage_driver']
     
     # Add log-file (prefer subcommand option, then global context, then auto-generate)
     if kwargs.get('log_file'):
@@ -132,4 +125,3 @@ def failure_recovery(ctx, **kwargs):
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         sys.exit(1)
-

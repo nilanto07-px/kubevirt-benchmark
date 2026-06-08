@@ -106,7 +106,7 @@ This guide helps you diagnose and resolve common issues when running virtbench p
   ```bash
   kubectl get storageclass YOUR-STORAGE-CLASS -o jsonpath='{.allowVolumeExpansion}'
   ```
-- If `false`, use `--skip-resize-job` to skip this phase
+- If `false`, use `--skip-resize` to skip this phase
 - Check storage backend limits and quotas
 
 ### Snapshot Creation Fails
@@ -118,7 +118,7 @@ This guide helps you diagnose and resolve common issues when running virtbench p
   ```bash
   kubectl get volumesnapshotclass
   ```
-- If not available, use `--skip-snapshot-job` to skip this phase
+- If not available, use `--skip-snapshot` to skip this phase
 - Verify storage backend supports CSI snapshots
 
 ### Out of Resources (VM Creation Fails)
@@ -166,8 +166,7 @@ Enable debug logging for detailed troubleshooting:
 # Using virtbench CLI
 virtbench datasource-clone --log-level DEBUG --start 1 --end 5
 
-# Using Python script
-python3 measure-vm-creation-time.py --log-level DEBUG --start 1 --end 5
+virtbench datasource-clone --log-level DEBUG --start 1 --end 5
 ```
 
 ## Performance Baselines
@@ -214,4 +213,3 @@ If you're still experiencing issues:
 - [Cluster Validation](user-guide/test-scenarios/cluster-validation.md) - Pre-flight checks
 - [Configuration Options](user-guide/configuration.md) - All available options
 - [Best Practices](best-practices.md) - Recommended practices
-

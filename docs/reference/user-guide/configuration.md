@@ -1,35 +1,52 @@
 # Configuration Options
 
-This page provides a comprehensive reference for all configuration options available in the virtbench CLI and Python scripts.
+This page provides a comprehensive reference for the `virtbench` CLI.
 
 ## VM Creation Tests
 
 Configuration options for DataSource-based VM provisioning and boot storm tests.
 
-| Option                   | Description                                                                            | Default            |
-|--------------------------|----------------------------------------------------------------------------------------|--------------------|
-| `--start`                | Starting namespace index                                                               | 1                  |
-| `--end`                  | Ending namespace index                                                                 | 100                |
-| `--vm-name`              | VM resource name                                                                       | rhel-9-vm          |
-| `--concurrency`          | Max parallel monitoring threads                                                        | 50                 |
-| `--ssh-pod`              | Pod name for ping tests                                                                | ssh-test-pod       |
-| `--ssh-pod-ns`           | Namespace of SSH pod                                                                   | default            |
-| `--poll-interval`        | Seconds between status checks                                                          | 1                  |
-| `--ping-timeout`         | Ping timeout in seconds                                                                | 600                |
-| `--log-file`             | Output log file path                                                                   | stdout             |
-| `--log-level`            | Logging level (DEBUG/INFO/WARNING/ERROR)                                               | INFO               |
-| `--namespace-prefix`     | Prefix for test namespaces                                                             | kubevirt-perf-test |
-| `--namespace-batch-size` | Namespaces to create in parallel                                                       | 20                 |
-| `--boot-storm`           | Enable boot storm testing                                                              | false              |
-| `--single-node`          | Run all VMs on a single node                                                           | false              |
-| `--node-name`            | Specific node to use (requires --single-node)                                          | auto-select        |
-| `--cleanup`              | Delete resources and namespaces after test                                             | false              |
-| `--cleanup-on-failure`   | Clean up even if tests fail                                                            | false              |
-| `--dry-run-cleanup`      | Show what would be deleted without deleting                                            | false              |
-| `--yes`                  | Skip confirmation prompt for cleanup                                                   | false              |
-| `--save-results`         | Save detailed results (JSON and CSV) inside a timestamped folder under results/ folder | false              |
-| `--results-folder`       | Base directory to store test results                                                   | ../results         |
-| `--storage-version`      | Storage version to include in results path (optional)                                  | -                  |
+| Option                       | Description                                                                            | Default                                          |
+|------------------------------|----------------------------------------------------------------------------------------|--------------------------------------------------|
+| `--start`                    | Starting namespace index                                                               | 1                                                |
+| `--end`                      | Ending namespace index                                                                 | 10                                               |
+| `--vm-name`                  | VM resource name                                                                       | rhel-9-vm                                        |
+| `--concurrency`              | Max parallel monitoring threads                                                        | 50                                               |
+| `--ssh-pod`                  | Pod name for ping tests                                                                | ssh-test-pod                                     |
+| `--ssh-pod-ns`               | Namespace of SSH pod                                                                   | default                                          |
+| `--poll-interval`            | Seconds between status checks                                                          | 1                                                |
+| `--ping-timeout`             | Ping timeout in seconds                                                                | 300                                              |
+| `--log-file`                 | Output log file path. With `--save-results`, the log is written into the run result folder unless explicitly overridden. | auto-generated |
+| `--namespace-prefix`         | Prefix for test namespaces                                                             | datasource-clone                                 |
+| `--namespace-batch-size`     | Namespaces to create in parallel                                                       | 20                                               |
+| `--boot-storm`               | Enable boot storm testing                                                              | false                                            |
+| `--skip-vm-creation`         | Reuse existing VMs (boot-storm only)                                                   | false                                            |
+| `--skip-namespace-creation`  | Skip namespace creation step                                                           | false                                            |
+| `--single-node`              | Run all VMs on a single node                                                           | false                                            |
+| `--node-name`                | Specific node to use (requires `--single-node`)                                        | auto-select                                      |
+| `--num-disks`                | Override number of data disks in the VM template                                       | template default                                 |
+| `--cleanup`                  | Delete resources and namespaces after test                                             | false                                            |
+| `--cleanup-on-failure`       | Clean up even if tests fail                                                            | false                                            |
+| `--dry-run-cleanup`          | Show what would be deleted without deleting                                            | false                                            |
+| `--yes`                      | Skip confirmation prompt for cleanup                                                   | false                                            |
+| `--save-results`             | Save log, detailed JSON/CSV, and summary JSON/CSV inside a timestamped run folder      | false                                            |
+| `--results-folder`           | Base directory to store test results                                                   | results                                          |
+| `--storage-driver`           | Storage driver label to include in results path, such as `portworx-3.6` or `ceph` | -                                             |
+
+Saved DataSource clone and boot-storm runs use this structure:
+
+```text
+results/{storage-driver}/{num-disks}-disk/{timestamp}_{namespace-prefix}_{start}-{end}/
+├── datasource-clone.log
+├── vm_creation_results.json
+├── vm_creation_results.csv
+├── summary_vm_creation_results.json
+├── summary_vm_creation_results.csv
+├── boot_storm_results.json
+├── boot_storm_results.csv
+├── summary_boot_storm_results.json
+└── summary_boot_storm_results.csv
+```
 
 ## Live Migration Tests
 
@@ -37,21 +54,19 @@ Configuration options for VM live migration testing.
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--start` | Starting namespace index | 1 |
-| `--end` | Ending namespace index | 10 |
-| `--vm-name` | VM resource name | rhel-9-vm |
-| `--namespace-prefix` | Prefix for test namespaces | kubevirt-perf-test |
+| `--start`, `-s` | Starting namespace index | 1 |
+| `--end`, `-e` | Ending namespace index | 10 |
+| `--vm-name`, `-n` | VM resource name | rhel-9-vm |
+| `--namespace-prefix` | Prefix for test namespaces | migration |
 | `--create-vms` | Create VMs before migration | false |
 | `--vm-template` | VM template YAML file | ../examples/vm-templates/vm-template.yaml |
-| `--single-node` | Create all VMs on a single node (requires --create-vms) | false |
-| `--node-name` | Specific node to create VMs on (requires --single-node) | auto-select |
+| `--storage-class` | Storage class name (required with --create-vms) | None |
 | `--source-node` | Source node name for migration | None |
+| `--source-nodes` | Comma-separated list of source nodes, repeatable if needed, or `all` for every worker | None |
 | `--target-node` | Target node name for migration | auto-select |
 | `--parallel` | Migrate VMs in parallel | false |
 | `--evacuate` | Evacuate all VMs from source node | false |
-| `--auto-select-busiest` | Auto-select the node with most VMs (requires --evacuate) | false |
-| `--round-robin` | Migrate VMs in round-robin fashion across all nodes | false |
-| `--concurrency` | Number of concurrent migrations | 10 |
+| `--concurrency`, `-c` | Number of concurrent migrations | 50 |
 | `--migration-timeout` | Timeout for each migration in seconds | 600 |
 | `--max-migration-retries` | Maximum retries for failed migrations | 3 |
 | `--vm-startup-timeout` | Timeout waiting for VMs to reach Running state | 3600 (1 hour) |
@@ -59,33 +74,36 @@ Configuration options for VM live migration testing.
 | `--ssh-pod-ns` | SSH test pod namespace | default |
 | `--ping-timeout` | Timeout for ping validation in seconds | 3600 (1 hour) |
 | `--skip-ping` | Skip ping validation after migration | false |
-| `--interleaved-scheduling` | Distribute parallel migration threads in interleaved pattern across nodes | false |
-| `--log-file` | Output log file path | stdout |
-| `--log-level` | Logging level (DEBUG/INFO/WARNING/ERROR) | INFO |
-| `--cleanup` | Delete VMs, VMIMs, and namespaces after test | false |
-| `--cleanup-on-failure` | Clean up resources even if tests fail | false |
-| `--dry-run-cleanup` | Show what would be deleted without deleting | false |
-| `--yes` | Skip confirmation prompt for cleanup | false |
-| `--skip-checks` | Skip VM verifications before migration | false |
+| `--log-file` | Output log file path | auto-generated |
+| `--cleanup / --no-cleanup` | Delete VMs, VMIMs, and namespaces after test | false |
+| `--yes`, `-y` | Skip confirmation prompts | false |
 | `--save-results` | Save detailed migration results (JSON and CSV) under results/ | false |
-| `--storage-version` | Storage version to include in results path (optional) | - |
+| `--storage-driver` | Storage driver to include in results path (optional) | - |
 | `--results-folder` | Base directory to store test results | ../results |
 
 ## Failure Recovery Tests
 
 Configuration options for failure and recovery testing with FAR.
 
+The `virtbench failure-recovery` wrapper auto-discovers VMs by node, so it
+does **not** take `--start`/`--end`.
+
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--start` | Starting namespace index | 1 |
-| `--end` | Ending namespace index | 5 |
-| `--vm-name` | VMI resource name | rhel-9-vm |
-| `--concurrency` | Max parallel threads | 10 |
-| `--ssh-pod` | Pod name for ping tests | ssh-test-pod |
-| `--ssh-pod-ns` | Namespace of SSH pod | default |
-| `--poll-interval` | Seconds between polls | 1 |
-| `--log-file` | Output log file path | stdout |
-| `--log-level` | Logging level | INFO |
+| `--node` *(required)* | Node name to auto-detect VMs from | — |
+| `--vm-name`, `-n` | VM resource name | rhel-9-vm |
+| `--vm-template` | VM template YAML file | ../examples/vm-templates/vm-template.yaml |
+| `--storage-class` | Storage class name (overrides template value) | None |
+| `--namespace-prefix` | Prefix for test namespaces | failure-recovery |
+| `--concurrency`, `-c` | Max parallel threads | 10 |
+| `--poll-interval` | Seconds between polls | 5 |
+| `--recovery-timeout` | Timeout for recovery in seconds | 600 |
+| `--cleanup / --no-cleanup` | Delete test resources after completion | false |
+| `--yes`, `-y` | Skip confirmation prompts | false |
+| `--save-results` | Save detailed results to results folder | false |
+| `--results-folder` | Base directory to store test results | ../results |
+| `--storage-driver` | Storage driver to include in results path (optional) | - |
+| `--log-file` | Log file path | auto-generated |
 
 ## Chaos Benchmark Tests
 
@@ -150,11 +168,11 @@ Configuration options for chaos benchmark testing.
 |--------|---------|-------------|
 | `--save-results` | `false` | Save results to JSON/CSV files |
 | `--results-dir` | `results` | Directory to save results |
-| `--storage-version` | `default` | Storage version for folder hierarchy (e.g., 3.2.0) |
+| `--storage-driver` | `default` | Storage driver for folder hierarchy (e.g., portworx-3.6) |
 
 Results are saved in the standard folder structure:
 ```
-results/{storage-version}/{num-disks}-disk/{timestamp}_chaos_benchmark_{total_vms}vms/
+results/{storage-driver}/{num-disks}-disk/{timestamp}_chaos_benchmark_{total_vms}vms/
 ```
 
 ### Logging Options
@@ -183,7 +201,7 @@ These options are available across multiple test types:
 ### Results
 
 - `--save-results`: Save detailed results to JSON and CSV files
-- `--storage-version`: Organize results by storage version
+- `--storage-driver`: Organize DataSource clone and boot-storm results by storage driver
 - `--results-folder` / `--results-dir`: Base directory for results
 
 ### Network Testing
@@ -215,6 +233,22 @@ echo 'export VIRTBENCH_REPO=/path/to/kubevirt-benchmark-suite' >> ~/.bashrc
 source ~/.bashrc
 ```
 
+### KUBECONFIG
+
+For direct Python script execution, set `KUBECONFIG` so the underlying
+`kubectl` calls use the intended cluster:
+
+```bash
+export KUBECONFIG=/path/to/kubeconfig
+```
+
+When using the `virtbench` CLI, you can either set `KUBECONFIG` or pass the
+global option:
+
+```bash
+virtbench --kubeconfig /path/to/kubeconfig validate-cluster --storage-class YOUR-STORAGE-CLASS
+```
+
 ## Configuration Files
 
 ### VM Templates
@@ -238,4 +272,3 @@ See the [Installation Guide](../../install.md) for details on using the template
 - [User Guide Overview](test-scenarios/overview.md) - Getting started with benchmarks
 - [Output and Results](output-and-results.md) - Understanding test output
 - [Installation Guide](../../install.md) - Setup and configuration
-

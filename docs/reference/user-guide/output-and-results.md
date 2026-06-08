@@ -60,15 +60,18 @@ Detailed logs are saved to the specified log file with:
 
 ## Saved Results
 
-When using `--save-results`, tests generate structured output files:
+When using `--save-results`, tests generate structured output files. For
+DataSource clone and boot-storm runs, the log file is saved in the same
+timestamped folder as the JSON and CSV files.
 
 ### File Structure
 
 ```
 results/
-├── {storage-version}/
+├── {storage-driver}/
 │   ├── {num-disks}-disk/
 │   │   ├── {timestamp}_vm_creation_{num_vms}vms/
+│   │   │   ├── datasource-clone.log
 │   │   │   ├── vm_creation_results.json
 │   │   │   ├── vm_creation_results.csv
 │   │   │   └── summary_vm_creation.json
@@ -194,7 +197,7 @@ kubevirt-perf-test-3,rhel-9-vm,8.89,11.98,Success
   ```bash
   kubectl get storageclass YOUR-STORAGE-CLASS -o jsonpath='{.allowVolumeExpansion}'
   ```
-- If `false`, use `--skip-resize-job` to skip this phase
+- If `false`, use `--skip-resize` to skip this phase
 - Check storage backend limits and quotas
 
 #### Snapshot creation fails
@@ -206,7 +209,7 @@ kubevirt-perf-test-3,rhel-9-vm,8.89,11.98,Success
   ```bash
   kubectl get volumesnapshotclass
   ```
-- If not available, use `--skip-snapshot-job` to skip this phase
+- If not available, use `--skip-snapshot` to skip this phase
 - Verify storage backend supports CSI snapshots
 
 #### Out of resources (VM creation fails)
@@ -254,8 +257,7 @@ Enable debug logging for detailed troubleshooting:
 # Using virtbench CLI
 virtbench datasource-clone --log-level DEBUG --start 1 --end 5
 
-# Using Python script
-python3 measure-vm-creation-time.py --log-level DEBUG --start 1 --end 5
+virtbench datasource-clone --log-level DEBUG --start 1 --end 5
 ```
 
 ## Performance Baselines
@@ -298,4 +300,3 @@ Expect 1.5-3x slower performance during boot storm compared to sequential creati
 - [Configuration Options](configuration.md) - All available configuration options
 - [Results Dashboard](results-dashboard.md) - Visualize test results
 - [User Guide](test-scenarios/overview.md) - Running different test scenarios
-
